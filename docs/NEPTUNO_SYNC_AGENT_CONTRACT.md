@@ -4,7 +4,7 @@
 
 El agente Vidalinkco NEPTUNO Sync Agent corre en una PC Windows de farmacia para preparar la sincronizacion segura entre NEPTUNO SQL Server y Vidalinkco por HTTPS.
 
-En esta fase el agente implementa configuracion segura, heartbeat, dry-run y envio manual de stock/precio desde CSV local. No conecta todavia a SQL Server, no instala Windows Service y no envia catalogo.
+En esta fase el agente implementa configuracion segura, heartbeat, dry-run, envio manual de stock/precio desde CSV local y envio manual de catalogo desde CSV local. No conecta todavia a SQL Server ni instala Windows Service.
 
 ## Endpoints Vidalinkco
 
@@ -20,7 +20,7 @@ Endpoints:
 
 - `POST /api/integrations/neptuno/heartbeat`
 - `POST /api/integrations/neptuno/stock-price`
-- Futuro: `POST /api/integrations/neptuno/catalog`
+- `POST /api/integrations/neptuno/catalog`
 
 Todas las respuestas deben usar envelope consistente:
 
@@ -208,33 +208,67 @@ Reglas del lector:
 - `estadoNombre`/`status` default: `ACTIVO`.
 - `syncedAt` default: hora UTC de lectura si viene vacio.
 
-## Payload catalog futuro
+## Payload catalog CSV
 
-Endpoint futuro:
+Endpoint:
 
 ```http
 POST /api/integrations/neptuno/catalog
 ```
 
-Payload futuro propuesto:
+Payload:
 
 ```json
 {
-  "agentId": "farmacia-principal-neptuno-001",
   "source": "neptuno",
-  "occurredAtUtc": "2026-06-22T02:25:00Z",
-  "batchId": "20260622T022500Z-0001",
+  "agentId": "farmacia-principal-neptuno-001",
+  "syncRunId": "opcional-20260622T022500Z",
   "items": [
     {
-      "externalProductId": "NEP-000123",
-      "sku": "7700000000012",
+      "externalId": "NEP-000123",
+      "nombreOriginal": "Producto ejemplo",
+      "nombreLargo": "Producto ejemplo descripcion larga",
+      "precioActual": 9.99,
+      "stockUnidad": 12,
+      "stockFraccion": 0,
+      "bodegaExternalId": "1",
+      "estadoExternalId": "ACT",
+      "estadoNombre": "ACTIVO",
+      "puedeVender": true,
+      "aplicaIvaOrigen": "S",
+      "ivaOrigenId": "0",
       "barcode": "7700000000012",
-      "name": "Producto ejemplo",
-      "description": "Descripcion proveniente de NEPTUNO si existe",
-      "brand": "Marca ejemplo",
-      "category": "Categoria ejemplo",
-      "isActive": true,
-      "updatedAtUtc": "2026-06-22T02:24:30Z"
+      "barcodeAlt": null,
+      "categoriaExternalId": "CAT-1",
+      "categoriaNombre": "Categoria origen",
+      "subcategoriaExternalId": "SUB-1",
+      "subcategoriaNombre": "Subcategoria origen",
+      "presentacion": "TAB",
+      "medida": "MG",
+      "concentracion": "40",
+      "unidadesPorCaja": 24,
+      "generico": "N",
+      "restriccionMedica": "N",
+      "requiereMedico": false,
+      "ventaSinStock": "N",
+      "cronico": "N",
+      "fabricanteExternalId": "FAB-1",
+      "fabricanteCodigo": "LAB",
+      "fabricanteNombre": "Laboratorio ejemplo",
+      "vademecumExternalId": "VAD-1",
+      "vademecumNombre": "Vademecum ejemplo",
+      "syncedAt": "2026-06-22T02:24:30Z",
+      "rawPayload": {
+        "precioOriginal": "9.99",
+        "aplicaIvaOrigen": "S",
+        "ivaOrigenId": "0",
+        "fechaIngreso": "2024-01-15",
+        "tipoItem": "MED",
+        "bodegaHabilitado": "S",
+        "vademecumActivo": "S",
+        "vademecumFabricanteId": "FAB-1",
+        "ivaRateOrigen": "15"
+      }
     }
   ]
 }
@@ -242,9 +276,128 @@ Payload futuro propuesto:
 
 Reglas:
 
-- El catalogo no debe borrar productos en Vidalinkco de forma implicita.
-- `isActive: false` debe interpretarse como desactivacion controlada, no eliminacion fisica.
-- Campos editoriales de Vidalinkco deben seguir siendo propiedad del backend Vidalinkco salvo contrato explicito posterior.
+- El catalogo NEPTUNO alimenta `ExternalProduct` y revision admin.
+- El catalogo no crea productos publicos automaticamente.
+- El catalogo no activa productos, no indexa, no modifica sitemap y no toca checkout, carrito, PDP, `Product` publico ni motor de precios.
+- `precioActual` sigue siendo dato operativo externo para `ExternalProduct` / `ProductLiveState`; no es precio publico automatico.
+- `ProductLiveState.precioActual` no debe usarse automaticamente como precio de checkout publico sin capa de adaptacion.
+- Cualquier paso futuro para crear un `Product` publico desde NEPTUNO necesita una capa de conversion editorial y comercial.
+- `aplicaIvaOrigen` preserva valores de origen como `S`, `N`, `true`, `false` o `null`.
+- `ivaOrigenId` preserva `in_item.id_iva` como string.
+- `puedeVender` es boolean opcional.
+- `requiereMedico` es boolean opcional.
+- `generico`, `restriccionMedica`, `ventaSinStock` y `cronico` preservan texto de origen como `S`, `N` o `null`.
+- `rawPayload` conserva solo valores permitidos para auditoria. No debe incluir costos, margenes, utilidad ni datos internos financieros.
+
+## Formato CSV catalogo
+
+Columnas recomendadas:
+
+```csv
+externalId,nombreOriginal,nombreLargo,precioActual,stockUnidad,stockFraccion,bodegaExternalId,estadoExternalId,estadoNombre,puedeVender,aplicaIvaOrigen,ivaOrigenId,barcode,barcodeAlt,categoriaExternalId,categoriaNombre,subcategoriaExternalId,subcategoriaNombre,presentacion,medida,concentracion,unidadesPorCaja,generico,restriccionMedica,requiereMedico,ventaSinStock,cronico,fabricanteExternalId,fabricanteCodigo,fabricanteNombre,vademecumExternalId,vademecumNombre,syncedAt
+```
+
+Alias amigables aceptados:
+
+- `name` -> `nombreOriginal`
+- `longName` -> `nombreLargo`
+- `price` -> `precioActual`
+- `warehouseExternalId` -> `bodegaExternalId`
+- `status` -> `estadoNombre`
+- `canSell` -> `puedeVender`
+- `appliesIva` -> `aplicaIvaOrigen`
+- `ivaId` -> `ivaOrigenId`
+- `alternateBarcode` -> `barcodeAlt`
+
+Reglas del lector:
+
+- Archivo UTF-8.
+- Separador permitido: coma o punto y coma.
+- Decimales permitidos: `9.99` o `9,99`.
+- Booleanos flexibles permitidos para `puedeVender` y `requiereMedico`: `S`, `N`, `true`, `false`, `1`, `0`, `si`, `no`.
+- `generico`, `restriccionMedica`, `ventaSinStock` y `cronico` no se convierten a boolean; se preservan como texto de origen.
+- Filas invalidas se saltan y se registran en log local.
+- Una fila invalida no rompe todo el lote.
+- `CatalogMaxRows` limita cuantas filas se leen.
+- `CatalogSendBatchSize` controla cuantos items se envian por request real.
+- `CatalogDryRunLimit` limita cuantos items se muestran en dry-run.
+- Campos requeridos en CSV v1: `externalId`, `nombreOriginal`/`name`, `precioActual`/`price`, `stockUnidad`, `stockFraccion`.
+
+## Mapeo NEPTUNO a catalogo Vidalinkco
+
+- `in_item.id_item` -> `externalId`
+- `in_item.descripcion` -> `nombreOriginal`
+- `in_item.descripcion_larga` -> `nombreLargo`
+- `in_item.precio` -> `precioActual` operativo externo
+- `in_item.aplica_iva` -> `aplicaIvaOrigen`
+- `in_item.id_iva` -> `ivaOrigenId`
+- `in_item.cod_barra` -> `barcode`
+- `in_item.cod_barra_alterno` -> `barcodeAlt`
+- `in_item.id_clasif_1` -> `categoriaExternalId`
+- `in_item.id_clasif_2` -> `subcategoriaExternalId`
+- `in_item.id_estado_item` -> `estadoExternalId`
+- `in_item.fecha_ingreso` -> `rawPayload.fechaIngreso`
+- `in_item.tipo_item` -> `rawPayload.tipoItem`
+- `in_item.id_marca_item` -> `rawPayload.marcaItemExternalId`
+- `in_item_bodega.id_bodega` -> `bodegaExternalId`
+- `in_item_bodega.stock_unidad` -> `stockUnidad`
+- `in_item_bodega.stock_fraccion` -> `stockFraccion`
+- `in_item_bodega.habilitado` -> `rawPayload.bodegaHabilitado`
+- `in_item_bodega.id_ubicacion` -> `rawPayload.ubicacion`
+- `in_item_bodega.fecha_ult_venta` -> `rawPayload.fechaUltVenta`
+- `in_item_bodega.fecha_ult_compra` -> `rawPayload.fechaUltCompra`
+- `in_item_bodega.fecha_ult_trans` -> `rawPayload.fechaUltTrans`
+- `in_item_bodega.fecha_ult_ajuste` -> `rawPayload.fechaUltAjuste`
+- `in_estado_item.descripcion` -> `estadoNombre`
+- `in_estado_item.puede_vender` -> `puedeVender`
+- `in_estado_item.codigo` -> `rawPayload.estadoCodigo`
+- `in_estado_item.activo` -> `rawPayload.estadoActivo`
+- `in_nodo_clasif_1.descripcion` -> `categoriaNombre`
+- `in_nodo_clasif_2.descripcion` -> `subcategoriaNombre`
+- `in_producto.presentacion` -> `presentacion`
+- `in_producto.medida` -> `medida`
+- `in_producto.concentracion` -> `concentracion`
+- `in_producto.num_fraccion` -> `unidadesPorCaja`
+- `in_producto.generico` -> `generico`
+- `in_producto.restric_medica` -> `restriccionMedica`
+- `in_producto.requiere_medico` -> `requiereMedico`
+- `in_producto.venta_sin_stock` -> `ventaSinStock`
+- `in_producto.cronico` -> `cronico`
+- `in_producto.id_fabricante` -> `fabricanteExternalId`
+- `in_fabricante.mnemonico` -> `fabricanteCodigo`
+- `co_ente.nombre_completo` -> `fabricanteNombre`
+- `in_producto.id_vademecum` -> `vademecumExternalId`
+- `fa_vademecum.descripcion` -> `vademecumNombre`
+- `fa_vademecum.activo` -> `rawPayload.vademecumActivo`
+- `fa_vademecum.id_fabricante` -> `rawPayload.vademecumFabricanteId`
+- `im_impuesto_iva.porcentaje` -> `rawPayload.ivaRateOrigen`
+
+## Campos excluidos de catalogo v1
+
+No incluir en payload ni en `rawPayload`:
+
+- `costo_prom_0`
+- `costo_prom_1`
+- `costo_ult_compra`
+- `costo_servicio`
+- `porc_utilidad`
+- `vvf`
+- `pvf`
+- `precio_ant`
+- cualquier margen, utilidad, costo de compra o dato interno financiero
+
+Razon: son datos internos sensibles, no son necesarios para publicacion editorial y no deben viajar al VPS en esta fase.
+
+## Vademecum v1
+
+En esta fase solo se envia metadata:
+
+- `vademecumExternalId`
+- `vademecumNombre`
+- `rawPayload.vademecumActivo`
+- `rawPayload.vademecumFabricanteId`
+
+No enviar todavia `fa_vademecum.cabecera`. No enviar blobs, imagenes ni textos medicos largos. El vademecum completo sera una fase separada.
 
 ## Seguridad
 
@@ -262,6 +415,7 @@ Valor inicial:
 
 - Heartbeat: `BatchSize = 100`
 - Stock/precio CSV: `SendBatchSize = 100`
+- Catalogo CSV: `CatalogSendBatchSize = 100`
 
 Limites del agente:
 
@@ -281,6 +435,7 @@ Regla inicial:
 - Heartbeat en modo worker: reintenta en el siguiente intervalo configurado.
 - Timeouts HTTP: 30 segundos.
 - Stock/precio CSV manual: si un batch falla, el comando registra status/body resumido y termina con error.
+- Catalogo CSV manual: si un batch falla, el comando registra status/body resumido y termina con error.
 - Futuro SQL/catalog: usar lotes idempotentes por `batchId` o cursor confirmado.
 - Futuro SQL/catalog: reintentar errores transitorios HTTP `408`, `429`, `500`, `502`, `503`, `504`.
 - No reintentar indefinidamente errores de contrato `400`, `401`, `403`, `422`; deben quedar visibles en logs.

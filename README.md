@@ -93,6 +93,56 @@ dotnet run --project .\Vidalinkco.NeptunoSyncAgent -- --stock-price-csv-once
 
 El agente envia `POST /api/integrations/neptuno/stock-price` por lotes de `SendBatchSize`. No pegues la API key ni CSV reales en commits, issues o logs compartidos.
 
+## CSV catalogo
+
+El catalogo CSV usa `NeptunoSyncAgent:CatalogCsvPath` y envia a `POST /api/integrations/neptuno/catalog`.
+
+El catalogo NEPTUNO alimenta `ExternalProduct` y revision admin. No crea productos publicos, no activa productos, no indexa, no modifica sitemap, no toca checkout, carrito, PDP, `Product` publico ni motor de precios. Cualquier conversion futura desde NEPTUNO hacia `Product` requiere una capa editorial y comercial.
+
+Columnas recomendadas:
+
+```csv
+externalId,nombreOriginal,nombreLargo,precioActual,stockUnidad,stockFraccion,bodegaExternalId,estadoExternalId,estadoNombre,puedeVender,aplicaIvaOrigen,ivaOrigenId,barcode,barcodeAlt,categoriaExternalId,categoriaNombre,subcategoriaExternalId,subcategoriaNombre,presentacion,medida,concentracion,unidadesPorCaja,generico,restriccionMedica,requiereMedico,ventaSinStock,cronico,fabricanteExternalId,fabricanteCodigo,fabricanteNombre,vademecumExternalId,vademecumNombre,syncedAt
+```
+
+Alias amigables aceptados:
+
+- `name` -> `nombreOriginal`
+- `longName` -> `nombreLargo`
+- `price` -> `precioActual`
+- `warehouseExternalId` -> `bodegaExternalId`
+- `status` -> `estadoNombre`
+- `canSell` -> `puedeVender`
+- `appliesIva` -> `aplicaIvaOrigen`
+- `ivaId` -> `ivaOrigenId`
+- `alternateBarcode` -> `barcodeAlt`
+
+`puedeVender` y `requiereMedico` se leen como booleanos flexibles. `generico`, `restriccionMedica`, `ventaSinStock` y `cronico` se preservan como texto de origen (`S`, `N`, vacio/null, etc.) para coincidir con el backend real.
+
+Campos de costo, margen, utilidad, precio anterior, VVF/PVF o datos internos financieros no deben incluirse. El agente no los mapea al payload ni al `rawPayload`.
+
+Vademecum v1 solo envia metadata (`vademecumExternalId`, `vademecumNombre`, `rawPayload.vademecumActivo`, `rawPayload.vademecumFabricanteId`). No envia cabeceras, blobs, imagenes ni textos medicos largos.
+
+## Ejecutar catalogo CSV en dry-run
+
+Configura `CatalogCsvPath` en `appsettings.local.json` apuntando a un CSV local. Luego:
+
+```powershell
+dotnet run --project .\Vidalinkco.NeptunoSyncAgent -- --catalog-csv-once --dry-run
+```
+
+El dry-run muestra total leido, total valido, total invalido, primer payload/batch y resumen de filas invalidas.
+
+## Ejecutar catalogo CSV real
+
+Con `DryRun: false`, `VidalinkcoBaseUrl` real, `ApiKey` real solo local y `CatalogCsvPath` local:
+
+```powershell
+dotnet run --project .\Vidalinkco.NeptunoSyncAgent -- --catalog-csv-once
+```
+
+El agente envia por lotes de `CatalogSendBatchSize`. No pegues la API key ni CSV reales en commits, issues o logs compartidos.
+
 ## Publicar EXE self-contained para Windows
 
 ```powershell
@@ -103,5 +153,5 @@ Despues de publicar, coloca un `appsettings.local.json` junto al ejecutable si n
 
 ## Estado de esta fase
 
-- Implementado: configuracion tipada, dry-run, cliente HTTPS, heartbeat manual, CSV stock/precio manual, ciclo worker de heartbeat y logging local basico.
-- No implementado todavia: conexion SQL Server real, lectura de tablas NEPTUNO, catalogo y Windows Service.
+- Implementado: configuracion tipada, dry-run, cliente HTTPS, heartbeat manual, CSV stock/precio manual, CSV catalogo manual, ciclo worker de heartbeat y logging local basico.
+- No implementado todavia: conexion SQL Server real, lectura directa de tablas NEPTUNO, publicacion automatica de productos, vademecum completo y Windows Service.

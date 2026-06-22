@@ -32,6 +32,14 @@ public sealed class NeptunoSyncAgentOptions
 
     public int StockPriceDryRunLimit { get; set; } = 10;
 
+    public string CatalogCsvPath { get; set; } = "samples/catalog.csv";
+
+    public int CatalogMaxRows { get; set; } = 1000;
+
+    public int CatalogSendBatchSize { get; set; } = 100;
+
+    public int CatalogDryRunLimit { get; set; } = 5;
+
     public string LogDirectory { get; set; } = "logs";
 
     public string EffectiveMachineName =>
@@ -79,6 +87,31 @@ public sealed class NeptunoSyncAgentOptions
         if (StockPriceDryRunLimit is < 1 or > 100)
         {
             throw new InvalidOperationException("NeptunoSyncAgent:StockPriceDryRunLimit must be between 1 and 100.");
+        }
+    }
+
+    public void ValidateForCatalogCsv()
+    {
+        ValidateCommon();
+
+        if (string.IsNullOrWhiteSpace(CatalogCsvPath))
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:CatalogCsvPath is required.");
+        }
+
+        if (CatalogMaxRows is < 1 or > 100000)
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:CatalogMaxRows must be between 1 and 100000.");
+        }
+
+        if (CatalogSendBatchSize is < 1 or > 500)
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:CatalogSendBatchSize must be between 1 and 500.");
+        }
+
+        if (CatalogDryRunLimit is < 1 or > 100)
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:CatalogDryRunLimit must be between 1 and 100.");
         }
     }
 
