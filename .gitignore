@@ -1,0 +1,45 @@
+# Build outputs
+bin/
+obj/
+**/bin/
+**/obj/
+publish/
+**/publish/
+artifacts/
+**/artifacts/
+
+# Local secrets and machine-specific settings
+appsettings.local.json
+**/appsettings.local.json
+appsettings.*.local.json
+**/appsettings.*.local.json
+.env
+.env.*
+*.pfx
+*.pem
+*.key
+*.secret
+*.secrets.json
+
+# Local logs and runtime data
+logs/
+**/logs/
+data/
+**/data/
+exports/
+**/exports/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# OS and IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
