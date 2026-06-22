@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Vidalinkco.NeptunoSyncAgent.Configuration;
 using Vidalinkco.NeptunoSyncAgent.Contracts;
@@ -12,6 +13,7 @@ public sealed class VidalinkcoApiClient(
 {
     private const string IntegrationKeyHeaderName = "x-vidalinkco-integration-key";
     private static readonly Uri HeartbeatEndpoint = new("/api/integrations/neptuno/heartbeat", UriKind.Relative);
+    private static readonly Uri StockPriceEndpoint = new("/api/integrations/neptuno/stock-price", UriKind.Relative);
 
     public async Task<HeartbeatResponse> SendHeartbeatAsync(
         HeartbeatPayload payload,
@@ -22,11 +24,12 @@ public sealed class VidalinkcoApiClient(
 
         using var httpClient = CreateClient(currentOptions);
         using var response = await httpClient.PostAsJsonAsync(HeartbeatEndpoint, payload, cancellationToken);
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
 
         VidalinkcoEnvelope<HeartbeatResponse>? envelope = null;
         try
         {
-            envelope = await response.Content.ReadFromJsonAsync<VidalinkcoEnvelope<HeartbeatResponse>>(cancellationToken);
+            envelope = JsonSerializer.Deserialize<VidalinkcoEnvelope<HeartbeatResponse>>(responseBody, JsonOptions);
         }
         catch (Exception exception)
         {
@@ -35,8 +38,10 @@ public sealed class VidalinkcoApiClient(
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new HttpRequestException(
-                $"Heartbeat failed with HTTP {(int)response.StatusCode}. Vidalinkco error: {envelope?.Error ?? "unavailable"}");
+            throw new VidalinkcoApiException(
+                $"Heartbeat failed with HTTP {(int)response.StatusCode}. Vidalinkco error: {envelope?.Error ?? "unavailable"}",
+                (int)response.StatusCode,
+                SummarizeBody(responseBody));
         }
 
         if (envelope is null)
@@ -52,6 +57,48 @@ public sealed class VidalinkcoApiClient(
         return envelope.Data ?? new HeartbeatResponse(DateTimeOffset.UtcNow, "ok");
     }
 
+    public async Task<StockPriceResponse> SendStockPriceAsync(
+        StockPricePayload payload,
+        CancellationToken cancellationToken)
+    {
+        var currentOptions = options.CurrentValue;
+        currentOptions.ValidateForStockPriceCsv();
+
+        using var httpClient = CreateClient(currentOptions);
+        using var response = await httpClient.PostAsJsonAsync(StockPriceEndpoint, payload, cancellationToken);
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        VidalinkcoEnvelope<StockPriceResponse>? envelope = null;
+        try
+        {
+            envelope = JsonSerializer.Deserialize<VidalinkcoEnvelope<StockPriceResponse>>(responseBody, JsonOptions);
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Vidalinkco stock-price response was not a valid envelope.");
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new VidalinkcoApiException(
+                $"Stock-price batch failed with HTTP {(int)response.StatusCode}. Vidalinkco error: {envelope?.Error ?? "unavailable"}",
+                (int)response.StatusCode,
+                SummarizeBody(responseBody));
+        }
+
+        if (envelope is null)
+        {
+            throw new InvalidOperationException("Stock-price batch failed because Vidalinkco returned an empty or invalid envelope.");
+        }
+
+        if (!envelope.Ok)
+        {
+            throw new InvalidOperationException($"Stock-price batch rejected by Vidalinkco: {envelope.Error ?? "unknown error"}");
+        }
+
+        return envelope.Data ?? new StockPriceResponse(DateTimeOffset.UtcNow, "ok", payload.Items.Count);
+    }
+
     private static HttpClient CreateClient(NeptunoSyncAgentOptions options)
     {
         var httpClient = new HttpClient
@@ -64,4 +111,17 @@ public sealed class VidalinkcoApiClient(
         httpClient.DefaultRequestHeaders.Add(IntegrationKeyHeaderName, options.ApiKey.Trim());
         return httpClient;
     }
+
+    private static string SummarizeBody(string responseBody)
+    {
+        if (string.IsNullOrWhiteSpace(responseBody))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = responseBody.Trim();
+        return trimmed.Length <= 1000 ? trimmed : trimmed[..1000];
+    }
+
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 }

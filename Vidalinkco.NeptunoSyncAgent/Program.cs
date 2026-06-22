@@ -13,14 +13,17 @@ if (args.Any(arg => string.Equals(arg, "--dry-run", StringComparison.OrdinalIgno
 }
 
 var runHeartbeatOnce = args.Any(arg => string.Equals(arg, "--heartbeat-once", StringComparison.OrdinalIgnoreCase));
+var runStockPriceCsvOnce = args.Any(arg => string.Equals(arg, "--stock-price-csv-once", StringComparison.OrdinalIgnoreCase));
 
 builder.Services.Configure<NeptunoSyncAgentOptions>(
     builder.Configuration.GetSection(NeptunoSyncAgentOptions.SectionName));
 builder.Services.AddSingleton<LocalFileLogWriter>();
+builder.Services.AddSingleton<StockPriceCsvReader>();
 builder.Services.AddSingleton<VidalinkcoApiClient>();
 builder.Services.AddSingleton<HeartbeatRunner>();
+builder.Services.AddSingleton<StockPriceCsvRunner>();
 
-if (!runHeartbeatOnce)
+if (!runHeartbeatOnce && !runStockPriceCsvOnce)
 {
     builder.Services.AddHostedService<Worker>();
 }
@@ -30,6 +33,12 @@ using var host = builder.Build();
 if (runHeartbeatOnce)
 {
     await host.Services.GetRequiredService<HeartbeatRunner>().RunOnceAsync(CancellationToken.None);
+    return;
+}
+
+if (runStockPriceCsvOnce)
+{
+    await host.Services.GetRequiredService<StockPriceCsvRunner>().RunOnceAsync(CancellationToken.None);
     return;
 }
 

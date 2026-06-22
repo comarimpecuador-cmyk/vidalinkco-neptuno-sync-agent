@@ -24,6 +24,14 @@ public sealed class NeptunoSyncAgentOptions
 
     public int BatchSize { get; set; } = 100;
 
+    public string StockPriceCsvPath { get; set; } = "samples/stock-price.csv";
+
+    public int MaxRows { get; set; } = 1000;
+
+    public int SendBatchSize { get; set; } = 100;
+
+    public int StockPriceDryRunLimit { get; set; } = 10;
+
     public string LogDirectory { get; set; } = "logs";
 
     public string EffectiveMachineName =>
@@ -31,20 +39,7 @@ public sealed class NeptunoSyncAgentOptions
 
     public void ValidateForHeartbeat()
     {
-        if (string.IsNullOrWhiteSpace(Source))
-        {
-            throw new InvalidOperationException("NeptunoSyncAgent:Source is required.");
-        }
-
-        if (!string.Equals(Source, "neptuno", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException("NeptunoSyncAgent:Source must be 'neptuno' for this agent.");
-        }
-
-        if (string.IsNullOrWhiteSpace(AgentId))
-        {
-            throw new InvalidOperationException("NeptunoSyncAgent:AgentId is required.");
-        }
+        ValidateCommon();
 
         if (BatchSize is < 1 or > 500)
         {
@@ -59,6 +54,49 @@ public sealed class NeptunoSyncAgentOptions
         if (StockSyncIntervalSeconds < 60)
         {
             throw new InvalidOperationException("NeptunoSyncAgent:StockSyncIntervalSeconds must be at least 60.");
+        }
+    }
+
+    public void ValidateForStockPriceCsv()
+    {
+        ValidateCommon();
+
+        if (string.IsNullOrWhiteSpace(StockPriceCsvPath))
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:StockPriceCsvPath is required.");
+        }
+
+        if (MaxRows is < 1 or > 100000)
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:MaxRows must be between 1 and 100000.");
+        }
+
+        if (SendBatchSize is < 1 or > 500)
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:SendBatchSize must be between 1 and 500.");
+        }
+
+        if (StockPriceDryRunLimit is < 1 or > 100)
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:StockPriceDryRunLimit must be between 1 and 100.");
+        }
+    }
+
+    private void ValidateCommon()
+    {
+        if (string.IsNullOrWhiteSpace(Source))
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:Source is required.");
+        }
+
+        if (!string.Equals(Source, "neptuno", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:Source must be 'neptuno' for this agent.");
+        }
+
+        if (string.IsNullOrWhiteSpace(AgentId))
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:AgentId is required.");
         }
 
         if (!DryRun && string.IsNullOrWhiteSpace(ApiKey))
