@@ -267,7 +267,20 @@ Payload:
         "bodegaHabilitado": "S",
         "vademecumActivo": "S",
         "vademecumFabricanteId": "FAB-1",
-        "ivaRateOrigen": "15"
+        "ivaRateOrigen": "15",
+        "sustitutoExternalId": "SUS-1",
+        "sustitutoCodigo": "FURO",
+        "sustitutoDescripcion": "FUROSEMIDA",
+        "sustitutoNivel": "1",
+        "sustitutoActivo": "S",
+        "activeIngredientCandidate": "FUROSEMIDA",
+        "activeIngredientCandidateSource": "in_item_sustituto",
+        "proveedorPrincipalExternalId": "PROV-1",
+        "proveedorPrincipalNombre": "Proveedor operativo",
+        "proveedorPrincipalActivo": "S",
+        "proveedorProductoDescripcion": "Producto proveedor",
+        "proveedoresCount": "3",
+        "proveedorSource": "in_proveedor_prod"
       }
     }
   ]
@@ -323,6 +336,51 @@ Reglas del lector:
 - `CatalogDryRunLimit` limita cuantos items se muestran en dry-run.
 - Campos requeridos en CSV v1: `externalId`, `nombreOriginal`/`name`, `precioActual`/`price`, `stockUnidad`, `stockFraccion`.
 
+## Catalog CSV v3 search candidates
+
+CSV v3 conserva candidatos de busqueda y proveedor privado solo dentro de `rawPayload`. No agrega campos top-level al contrato, no cambia endpoint y no publica productos.
+
+Campos de sustituto/principio activo candidato:
+
+- `rawPayload.sustitutoExternalId`
+- `rawPayload.sustitutoCodigo`
+- `rawPayload.sustitutoDescripcion`
+- `rawPayload.sustitutoNivel`
+- `rawPayload.sustitutoActivo`
+- `rawPayload.activeIngredientCandidate`
+- `rawPayload.activeIngredientCandidateSource`
+
+Reglas:
+
+- `activeIngredientCandidateSource` debe ser trazable, por ejemplo `in_item_sustituto`.
+- `sustitutoDescripcion` puede sugerir principio activo, grupo terapeutico o equivalencia NEPTUNO.
+- No debe publicarse automaticamente como claim medico.
+- No debe convertirse automaticamente en recomendacion medica.
+- Debe pasar por selector/revision antes de entrar a `Product` publico.
+
+Campos de proveedor privado:
+
+- `rawPayload.proveedorPrincipalExternalId`
+- `rawPayload.proveedorPrincipalNombre`
+- `rawPayload.proveedorPrincipalActivo`
+- `rawPayload.proveedorProductoDescripcion`
+- `rawPayload.proveedoresCount`
+- `rawPayload.proveedorSource`
+
+Reglas:
+
+- `proveedorSource` debe ser trazable, por ejemplo `in_proveedor_prod`.
+- No mostrar proveedor publicamente.
+- Sirve para reposicion, trazabilidad y operacion.
+- No enviarlo a SEO ni PDP publica por defecto.
+- No usar proveedor como argumento comercial publico sin revision.
+
+Sintomas:
+
+- NEPTUNO no tiene sintomas poblados en `fa_sintoma`.
+- NEPTUNO no tiene una relacion producto -> sintoma util confirmada.
+- Sintomas e intenciones de busqueda deben ser editoriales en Vidalinkco y manejarse por selector normalizado.
+
 ## Mapeo NEPTUNO a catalogo Vidalinkco
 
 - `in_item.id_item` -> `externalId`
@@ -371,6 +429,9 @@ Reglas del lector:
 - `fa_vademecum.activo` -> `rawPayload.vademecumActivo`
 - `fa_vademecum.id_fabricante` -> `rawPayload.vademecumFabricanteId`
 - `im_impuesto_iva.porcentaje` -> `rawPayload.ivaRateOrigen`
+- `in_item_sustituto` -> `rawPayload.sustitutoExternalId`, `rawPayload.sustitutoNivel`
+- `in_sustituto` -> `rawPayload.sustitutoCodigo`, `rawPayload.sustitutoDescripcion`, `rawPayload.sustitutoActivo`, `rawPayload.activeIngredientCandidate`
+- `in_proveedor_prod` -> `rawPayload.proveedorPrincipalExternalId`, `rawPayload.proveedorProductoDescripcion`, `rawPayload.proveedoresCount`, `rawPayload.proveedorSource`
 
 ## Campos excluidos de catalogo v1
 

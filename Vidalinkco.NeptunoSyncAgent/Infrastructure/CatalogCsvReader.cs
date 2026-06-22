@@ -553,6 +553,19 @@ public sealed class CatalogCsvReader(
         AddRawValue(rawPayload, "vademecumActivo", values, index, "vademecumactivo", "favademecumactivo");
         AddRawValue(rawPayload, "vademecumFabricanteId", values, index, "vademecumfabricanteid", "favademecumidfabricante");
         AddRawValue(rawPayload, "ivaRateOrigen", values, index, "ivarateorigen", "porcentajeiva", "imimpuestoivaporcentaje");
+        AddRawValue(rawPayload, "sustitutoExternalId", values, index, "sustitutoexternalid", "insustitutoid", "insustitutoidsustituto");
+        AddRawValue(rawPayload, "sustitutoCodigo", values, index, "sustitutocodigo", "insustitutocodigo");
+        AddRawValue(rawPayload, "sustitutoDescripcion", values, index, "sustitutodescripcion", "insustitutodescripcion");
+        AddRawValue(rawPayload, "sustitutoNivel", values, index, "sustitutonivel", "initemsustitutonivel");
+        AddRawValue(rawPayload, "sustitutoActivo", values, index, "sustitutoactivo", "insustitutoactivo");
+        AddRawValue(rawPayload, "activeIngredientCandidate", values, index, "activeingredientcandidate", "principioactivocandidato");
+        AddRawValue(rawPayload, "activeIngredientCandidateSource", values, index, "activeingredientcandidatesource", "principioactivocandidatofuente");
+        AddRawValue(rawPayload, "proveedorPrincipalExternalId", values, index, "proveedorprincipalexternalid", "proveedorprincipalid", "inproveedorprodidproveedor");
+        AddRawValue(rawPayload, "proveedorPrincipalNombre", values, index, "proveedorprincipalnombre", "proveedornombre");
+        AddRawValue(rawPayload, "proveedorPrincipalActivo", values, index, "proveedorprincipalactivo", "proveedoractivo");
+        AddRawValue(rawPayload, "proveedorProductoDescripcion", values, index, "proveedorproductodescripcion", "inproveedorproddescripcion");
+        AddRawValue(rawPayload, "proveedoresCount", values, index, "proveedorescount", "proveedorcount");
+        AddRawValue(rawPayload, "proveedorSource", values, index, "proveedorsource");
 
         return rawPayload;
     }

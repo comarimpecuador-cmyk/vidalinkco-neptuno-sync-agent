@@ -36,6 +36,8 @@ Este documento analiza informacion util que NEPTUNO puede aportar a Vidalinkco s
 - Ubicacion o bodega
 - IVA origen y tasa
 - Frescura del dato
+- Sustituto o principio activo candidato
+- Proveedor privado principal o alternos
 
 ## C. Utilidad para compra y operacion
 
@@ -86,3 +88,34 @@ Esa capa debe decidir:
 - Precio base e IVA compatibles con Vidalinkco
 
 Nunca copiar todo automaticamente. Si NEPTUNO entrega precio base, la conversion debe mapearlo a `Product.precio` base y `Product.iva`. Si NEPTUNO entrega precio final, debe convertirlo o marcarlo correctamente para no duplicar IVA.
+
+## Catalog CSV v3 search candidates
+
+NEPTUNO puede aportar candidatos utiles para busqueda, pero no verdades editoriales finales.
+
+Campos de `rawPayload` para sustituto/principio activo candidato:
+
+- `sustitutoExternalId`
+- `sustitutoCodigo`
+- `sustitutoDescripcion`
+- `sustitutoNivel`
+- `sustitutoActivo`
+- `activeIngredientCandidate`
+- `activeIngredientCandidateSource`
+
+Campos de `rawPayload` para proveedor privado:
+
+- `proveedorPrincipalExternalId`
+- `proveedorPrincipalNombre`
+- `proveedorPrincipalActivo`
+- `proveedorProductoDescripcion`
+- `proveedoresCount`
+- `proveedorSource`
+
+Uso futuro recomendado:
+
+- Mostrar candidatos en admin con nombres claros para humanos.
+- Normalizar mediante selectores antes de publicar.
+- Mantener proveedor como dato privado operativo.
+- Mantener sintomas/intenciones como entidades editoriales de Vidalinkco, no derivadas automaticamente desde NEPTUNO.
+- No exponer nombres de tablas NEPTUNO en PDP publica, SEO, filtros publicos ni textos visibles al cliente.

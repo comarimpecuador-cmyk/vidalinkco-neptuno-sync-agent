@@ -123,6 +123,23 @@ Campos de costo, margen, utilidad, precio anterior, VVF/PVF o datos internos fin
 
 Vademecum v1 solo envia metadata (`vademecumExternalId`, `vademecumNombre`, `rawPayload.vademecumActivo`, `rawPayload.vademecumFabricanteId`). No envia cabeceras, blobs, imagenes ni textos medicos largos.
 
+### Catalog CSV v3 search candidates
+
+CSV v3 puede conservar candidatos de busqueda y operacion solo dentro de `rawPayload`; no son campos top-level, no cambian endpoint y no publican producto.
+
+Campos aceptados en `rawPayload`:
+
+- Sustituto/principio activo candidato: `sustitutoExternalId`, `sustitutoCodigo`, `sustitutoDescripcion`, `sustitutoNivel`, `sustitutoActivo`, `activeIngredientCandidate`, `activeIngredientCandidateSource`.
+- Proveedor privado: `proveedorPrincipalExternalId`, `proveedorPrincipalNombre`, `proveedorPrincipalActivo`, `proveedorProductoDescripcion`, `proveedoresCount`, `proveedorSource`.
+
+Reglas:
+
+- `activeIngredientCandidateSource` debe indicar la fuente, por ejemplo `in_item_sustituto`.
+- `proveedorSource` debe indicar la fuente, por ejemplo `in_proveedor_prod`.
+- Sustituto/principio activo es candidato, no verdad editorial final ni recomendacion medica.
+- Proveedor es dato operativo privado; no se muestra en PDP publica, SEO ni filtros publicos.
+- Sintomas e intenciones de busqueda siguen siendo editoriales de Vidalinkco; NEPTUNO no trae sintomas utiles confirmados en esta fase.
+
 ## Ejecutar catalogo CSV en dry-run
 
 Configura `CatalogCsvPath` en `appsettings.local.json` apuntando a un CSV local. Luego:
