@@ -47,17 +47,17 @@ WITH bodega_preferida AS (
 ),
 sustituto_candidato AS (
   SELECT
-    iis.id_item,
+    iis.id_producto,
     iis.id_sustituto,
-    iis.nivel AS sustitutoNivel,
+    s.nivel AS sustitutoNivel,
     s.codigo AS sustitutoCodigo,
     s.descripcion AS sustitutoDescripcion,
     s.activo AS sustitutoActivo,
     ROW_NUMBER() OVER (
-      PARTITION BY iis.id_item
+      PARTITION BY iis.id_producto
       ORDER BY
         CASE WHEN s.activo = 'S' THEN 0 ELSE 1 END,
-        ISNULL(iis.nivel, 999999),
+        ISNULL(s.nivel, 999999),
         iis.id_sustituto
     ) AS rn
   FROM in_item_sustituto iis
@@ -93,7 +93,6 @@ proveedor_count AS (
 catalogo_base AS (
   SELECT
     i.id_item,
-    i.id_producto,
     bp.id_bodega,
     bp.stock_unidad,
     bp.stock_fraccion,
@@ -197,15 +196,15 @@ FROM catalogo_base cb
 JOIN in_item i
   ON i.id_item = cb.id_item
 LEFT JOIN in_producto p
-  ON p.id_producto = i.id_producto
+  ON p.id_producto = i.id_item
 LEFT JOIN in_estado_item ei
   ON ei.id_estado_item = i.id_estado_item
 LEFT JOIN in_nodo_clasif_1 c1
-  ON c1.id_clasif_1 = i.id_clasif_1
+  ON c1.id_nodo_clasif_1 = i.id_clasif_1
 LEFT JOIN in_nodo_clasif_2 c2
-  ON c2.id_clasif_2 = i.id_clasif_2
+  ON c2.id_nodo_clasif_2 = i.id_clasif_2
 LEFT JOIN in_fabricante f
-  ON f.id_fabricante = p.id_fabricante
+  ON f.id_ente = p.id_fabricante
 LEFT JOIN co_ente fabricante_ente
   ON fabricante_ente.id_ente = f.id_ente
 LEFT JOIN fa_vademecum v
@@ -213,7 +212,7 @@ LEFT JOIN fa_vademecum v
 LEFT JOIN im_impuesto_iva iva
   ON iva.id_iva = i.id_iva
 LEFT JOIN sustituto_candidato sc
-  ON sc.id_item = i.id_item
+  ON sc.id_producto = i.id_item
  AND sc.rn = 1
 LEFT JOIN proveedor_principal pp
   ON pp.id_producto = p.id_producto
