@@ -76,11 +76,40 @@ Campos privados en `rawPayload`:
 
 Reglas:
 
+- `proveedorPrincipal*` solo se llena cuando NEPTUNO marca `in_proveedor_prod.principal = 'S'`.
+- Si no existe proveedor con `principal = 'S'`, `proveedorPrincipalExternalId`, `proveedorPrincipalNombre`, `proveedorPrincipalActivo` y `proveedorProductoDescripcion` deben quedar vacios/null.
+- `proveedoresCount` representa el total de relaciones proveedor-producto y debe conservarse siempre que se conozca.
+- No usar proveedor activo de fallback como proveedor principal.
+- Si en el futuro se guarda un fallback, debe tener otro nombre claro: `proveedorCandidatoNombre`, `proveedorFallbackNombre` o `proveedorSugeridoNombre`.
 - No mostrar proveedor publicamente.
 - Sirve para reposicion, trazabilidad y operacion.
 - No enviarlo a SEO ni PDP publica por defecto.
 - No usar proveedor como argumento comercial publico sin revision.
 - No todos los productos tienen proveedor principal.
+
+CTE recomendado para el CSV v3:
+
+```sql
+proveedor_principal AS (
+  SELECT
+    ipp.id_producto,
+    ipp.id_proveedor,
+    ipp.descripcion AS proveedorProductoDescripcion,
+    ipp.principal,
+    pp.activo AS proveedorActivo,
+    ce.nombre_completo AS proveedorNombre,
+    ROW_NUMBER() OVER (
+      PARTITION BY ipp.id_producto
+      ORDER BY ipp.id_proveedor
+    ) AS rn
+  FROM in_proveedor_prod ipp
+  LEFT JOIN pr_proveedor pp
+    ON pp.id_proveedor = ipp.id_proveedor
+  LEFT JOIN co_ente ce
+    ON ce.id_ente = ipp.id_proveedor
+  WHERE ipp.principal = 'S'
+)
+```
 
 ## 6. Sintomas e intenciones
 

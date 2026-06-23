@@ -117,5 +117,8 @@ Uso futuro recomendado:
 - Mostrar candidatos en admin con nombres claros para humanos.
 - Normalizar mediante selectores antes de publicar.
 - Mantener proveedor como dato privado operativo.
+- `proveedorPrincipal*` debe representar solo proveedor marcado como principal en NEPTUNO (`principal = 'S'`).
+- Si no hay proveedor principal, los campos `proveedorPrincipal*` deben quedar vacios/null; no se completan con fallback activo.
+- `proveedoresCount` si puede conservarse siempre como total de relaciones proveedor-producto.
 - Mantener sintomas/intenciones como entidades editoriales de Vidalinkco, no derivadas automaticamente desde NEPTUNO.
 - No exponer nombres de tablas NEPTUNO en PDP publica, SEO, filtros publicos ni textos visibles al cliente.

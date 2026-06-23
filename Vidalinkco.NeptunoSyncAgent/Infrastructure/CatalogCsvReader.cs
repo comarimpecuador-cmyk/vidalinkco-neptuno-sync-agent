@@ -560,9 +560,9 @@ public sealed class CatalogCsvReader(
         AddRawValue(rawPayload, "sustitutoActivo", values, index, "sustitutoactivo", "insustitutoactivo");
         AddRawValue(rawPayload, "activeIngredientCandidate", values, index, "activeingredientcandidate", "principioactivocandidato");
         AddRawValue(rawPayload, "activeIngredientCandidateSource", values, index, "activeingredientcandidatesource", "principioactivocandidatofuente");
-        AddRawValue(rawPayload, "proveedorPrincipalExternalId", values, index, "proveedorprincipalexternalid", "proveedorprincipalid", "inproveedorprodidproveedor");
-        AddRawValue(rawPayload, "proveedorPrincipalNombre", values, index, "proveedorprincipalnombre", "proveedornombre");
-        AddRawValue(rawPayload, "proveedorPrincipalActivo", values, index, "proveedorprincipalactivo", "proveedoractivo");
+        AddRawValue(rawPayload, "proveedorPrincipalExternalId", values, index, "proveedorprincipalexternalid", "proveedorprincipalid");
+        AddRawValue(rawPayload, "proveedorPrincipalNombre", values, index, "proveedorprincipalnombre");
+        AddRawValue(rawPayload, "proveedorPrincipalActivo", values, index, "proveedorprincipalactivo");
         AddRawValue(rawPayload, "proveedorProductoDescripcion", values, index, "proveedorproductodescripcion", "inproveedorproddescripcion");
         AddRawValue(rawPayload, "proveedoresCount", values, index, "proveedorescount", "proveedorcount");
         AddRawValue(rawPayload, "proveedorSource", values, index, "proveedorsource");

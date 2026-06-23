@@ -370,10 +370,39 @@ Campos de proveedor privado:
 Reglas:
 
 - `proveedorSource` debe ser trazable, por ejemplo `in_proveedor_prod`.
+- `proveedorPrincipal*` solo debe llenarse cuando NEPTUNO marca `in_proveedor_prod.principal = 'S'`.
+- Si no existe proveedor con `principal = 'S'`, `proveedorPrincipalExternalId`, `proveedorPrincipalNombre`, `proveedorPrincipalActivo` y `proveedorProductoDescripcion` deben quedar vacios/null.
+- `proveedoresCount` representa el total de relaciones proveedor-producto y debe mantenerse aunque no exista proveedor principal.
+- No usar proveedor activo de fallback como proveedor principal.
+- Si en una fase futura se conserva un fallback, debe tener otro nombre claro: `proveedorCandidatoNombre`, `proveedorFallbackNombre` o `proveedorSugeridoNombre`.
 - No mostrar proveedor publicamente.
 - Sirve para reposicion, trazabilidad y operacion.
 - No enviarlo a SEO ni PDP publica por defecto.
 - No usar proveedor como argumento comercial publico sin revision.
+
+CTE recomendado para generar proveedor principal en CSV v3:
+
+```sql
+proveedor_principal AS (
+  SELECT
+    ipp.id_producto,
+    ipp.id_proveedor,
+    ipp.descripcion AS proveedorProductoDescripcion,
+    ipp.principal,
+    pp.activo AS proveedorActivo,
+    ce.nombre_completo AS proveedorNombre,
+    ROW_NUMBER() OVER (
+      PARTITION BY ipp.id_producto
+      ORDER BY ipp.id_proveedor
+    ) AS rn
+  FROM in_proveedor_prod ipp
+  LEFT JOIN pr_proveedor pp
+    ON pp.id_proveedor = ipp.id_proveedor
+  LEFT JOIN co_ente ce
+    ON ce.id_ente = ipp.id_proveedor
+  WHERE ipp.principal = 'S'
+)
+```
 
 Sintomas:
 
@@ -431,7 +460,8 @@ Sintomas:
 - `im_impuesto_iva.porcentaje` -> `rawPayload.ivaRateOrigen`
 - `in_item_sustituto` -> `rawPayload.sustitutoExternalId`, `rawPayload.sustitutoNivel`
 - `in_sustituto` -> `rawPayload.sustitutoCodigo`, `rawPayload.sustitutoDescripcion`, `rawPayload.sustitutoActivo`, `rawPayload.activeIngredientCandidate`
-- `in_proveedor_prod` -> `rawPayload.proveedorPrincipalExternalId`, `rawPayload.proveedorProductoDescripcion`, `rawPayload.proveedoresCount`, `rawPayload.proveedorSource`
+- `in_proveedor_prod` con `principal = 'S'` -> `rawPayload.proveedorPrincipalExternalId`, `rawPayload.proveedorProductoDescripcion`, `rawPayload.proveedorPrincipalNombre`, `rawPayload.proveedorPrincipalActivo`
+- `in_proveedor_prod` total por producto -> `rawPayload.proveedoresCount`, `rawPayload.proveedorSource`
 
 ## Campos excluidos de catalogo v1
 

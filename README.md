@@ -140,6 +140,14 @@ Reglas:
 - Proveedor es dato operativo privado; no se muestra en PDP publica, SEO ni filtros publicos.
 - Sintomas e intenciones de busqueda siguen siendo editoriales de Vidalinkco; NEPTUNO no trae sintomas utiles confirmados en esta fase.
 
+Proveedor privado en CSV v3:
+
+- `proveedorPrincipal*` solo debe llenarse cuando NEPTUNO marca `in_proveedor_prod.principal = 'S'`.
+- Si no existe proveedor principal, `proveedorPrincipalExternalId`, `proveedorPrincipalNombre`, `proveedorPrincipalActivo` y `proveedorProductoDescripcion` deben quedar vacios/null.
+- `proveedoresCount` debe mantenerse aunque no exista proveedor principal.
+- No usar proveedor activo de fallback como proveedor principal.
+- Si luego se decide conservar un fallback, debe llamarse con otro nombre claro, por ejemplo `proveedorCandidatoNombre`, `proveedorFallbackNombre` o `proveedorSugeridoNombre`.
+
 ## Ejecutar catalogo CSV en dry-run
 
 Configura `CatalogCsvPath` en `appsettings.local.json` apuntando a un CSV local. Luego:
