@@ -28,8 +28,13 @@ data/
 **/data/
 exports/
 **/exports/
+samples/vademecum-blobs/
+**/samples/vademecum-blobs/
 *.csv
 *.tsv
+*.bin
+*.blob
+*.dat
 *.log
 *.sqlite
 *.sqlite3
