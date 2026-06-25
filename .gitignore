@@ -50,3 +50,39 @@ samples/vademecum-blobs/
 *.suo
 Thumbs.db
 Desktop.ini
+
+
+# Build
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# Logs/temp
+*.log
+*.tmp
+*.bak
+*.zip
+
+# Local secrets / configs
+appsettings.local.json
+appsettings.*.local.json
+.env
+.env.*
+*.udl
+*.dsn
+
+# Local exports / real pharmacy data
+*.csv
+*.xlsx
+*.xls
+exports/
+local/
+private/
+samples/private/
+docs/private/
+
+# OS
+.DS_Store
+Thumbs.db
