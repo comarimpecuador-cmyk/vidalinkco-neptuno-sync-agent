@@ -1,0 +1,12 @@
+.gitignore text eol=lf
+README.md text eol=lf
+scripts/NeptunoAudit.Common.ps1 text eol=lf
+scripts/audit-neptuno-product.ps1 text eol=lf
+scripts/audit-neptuno-schema.ps1 text eol=lf
+scripts/audit-neptuno-vademecum-blob.ps1 text eol=lf
+docs/NEPTUNO_FARMACIA_AUDIT_RUNBOOK.md text eol=lf
+docs/NEPTUNO_TO_VIDALINKCO_FIELD_MAPPING.md text eol=lf
+docs/NEPTUNO_VADEMECUM_BLOB_AUDIT.md text eol=lf
+docs/sql/neptuno-product-audit.sql text eol=lf
+docs/sql/neptuno-schema-audit.sql text eol=lf
+docs/sql/neptuno-vademecum-blob-audit.sql text eol=lf

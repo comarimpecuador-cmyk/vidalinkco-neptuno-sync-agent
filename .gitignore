@@ -32,6 +32,10 @@ samples/vademecum-blobs/
 **/samples/vademecum-blobs/
 *.csv
 *.tsv
+*.xlsx
+*.xls
+*.jsonl
+*.dump
 *.bin
 *.blob
 *.dat
@@ -75,8 +79,6 @@ appsettings.*.local.json
 
 # Local exports / real pharmacy data
 *.csv
-*.xlsx
-*.xls
 exports/
 local/
 private/

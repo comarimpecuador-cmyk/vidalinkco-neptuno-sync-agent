@@ -112,10 +112,18 @@ Ninguna hipotesis debe asumirse como confirmada sin comparar bytes, identificar 
 ## Herramientas de esta fase
 
 - SQL read-only: `docs/sql/vademecum-blob-audit.sql`
-- Exportador local opcional: `scripts/export-vademecum-blob-samples.ps1`
+- Auditor formal con previews acotados:
+  `scripts/audit-neptuno-vademecum-blob.ps1`
+- SQL formal para PC farmacia:
+  `docs/sql/neptuno-vademecum-blob-audit.sql`
+- Exportador binario local anterior y opcional:
+  `scripts/export-vademecum-blob-samples.ps1`
 - Salida local sugerida: `samples/vademecum-blobs/`
 
-El exportador usa autenticacion integrada y consultas `SELECT`, limita el numero de muestras y no modifica la base.
+El auditor formal no exporta blobs completos. El exportador binario anterior
+solo debe usarse como una fase separada y autorizada cuando sea necesario
+analizar muestras locales. Ambos usan autenticacion integrada y consultas
+`SELECT`, y no modifican la base.
 
 Ejemplo:
 

@@ -179,4 +179,15 @@ Despues de publicar, coloca un `appsettings.local.json` junto al ejecutable si n
 ## Estado de esta fase
 
 - Implementado: configuracion tipada, dry-run, cliente HTTPS, heartbeat manual, CSV stock/precio manual, CSV catalogo manual, ciclo worker de heartbeat y logging local basico.
-- No implementado todavia: conexion SQL Server real, lectura directa de tablas NEPTUNO, publicacion automatica de productos, vademecum completo y Windows Service.
+- No implementado todavia en el runtime del agente: conexion SQL Server real, lectura directa de tablas NEPTUNO, publicacion automatica de productos, vademecum completo y Windows Service.
+
+## Pack de auditoria read-only en farmacia
+
+El repositorio incluye scripts PowerShell locales para auditorias autorizadas de
+SQL Server. No cambian el runtime del agente ni envian datos a Vidalinkco.
+
+- Runbook: `docs/NEPTUNO_FARMACIA_AUDIT_RUNBOOK.md`
+- Mapeo: `docs/NEPTUNO_TO_VIDALINKCO_FIELD_MAPPING.md`
+- Producto: `scripts/audit-neptuno-product.ps1`
+- Esquema: `scripts/audit-neptuno-schema.ps1`
+- Vademecum: `scripts/audit-neptuno-vademecum-blob.ps1`
