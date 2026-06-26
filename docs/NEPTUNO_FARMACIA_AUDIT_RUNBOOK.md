@@ -45,6 +45,11 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 Do not change machine-wide execution policy for this audit.
 
+If PowerShell opens in `C:\WINDOWS\system32`, the default export directory is
+still resolved from the repository root: `<repo-root>/exports/local-audit`.
+You can also pass an absolute `-OutputDirectory` when the evidence must be
+written somewhere else.
+
 ## Parameter contract
 
 Product audit:
@@ -54,7 +59,7 @@ Product audit:
 -Database         string, default NEPTUNO
 -ProductId        positive integer, default 9102
 -VademecumId      optional; defaults to in_producto.id_vademecum
--OutputDirectory  string, default ./exports/local-audit
+-OutputDirectory  string, default <repo-root>/exports/local-audit
 -Export           switch; without it the script prints a console summary only
 ```
 
@@ -63,7 +68,7 @@ Schema audit:
 ```text
 -Server           string, default localhost
 -Database         string, default NEPTUNO
--OutputDirectory  string, default ./exports/local-audit
+-OutputDirectory  string, default <repo-root>/exports/local-audit
 -Export           switch
 ```
 
@@ -74,7 +79,7 @@ Vademecum audit:
 -Database         string, default NEPTUNO
 -ProductId        positive integer, default 9102
 -VademecumId      optional; if omitted it is resolved from ProductId
--OutputDirectory  string, default ./exports/local-audit
+-OutputDirectory  string, default <repo-root>/exports/local-audit
 -Export           switch
 ```
 

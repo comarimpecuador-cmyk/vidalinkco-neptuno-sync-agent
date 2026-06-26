@@ -14,16 +14,8 @@ function New-NeptunoReadOnlyConnection {
         [string]$ApplicationName
     )
 
-    $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
-    $builder.DataSource = $Server
-    $builder.InitialCatalog = $Database
-    $builder.IntegratedSecurity = $true
-    $builder.ApplicationIntent = [System.Data.SqlClient.ApplicationIntent]::ReadOnly
-    $builder.Encrypt = $false
-    $builder.ConnectTimeout = 15
-    $builder.ApplicationName = $ApplicationName
-
-    return New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString
+    $connectionString = "Data Source=$Server;Initial Catalog=$Database;Integrated Security=True;Encrypt=False;ApplicationIntent=ReadOnly;Connect Timeout=15;Application Name=$ApplicationName"
+    return New-Object System.Data.SqlClient.SqlConnection($connectionString)
 }
 
 function Invoke-NeptunoQuery {
@@ -119,17 +111,9 @@ function ConvertFrom-NeptunoDataTable {
                 $value[$column.ColumnName] = $null
             }
             elseif ($rawValue -is [byte[]]) {
-                $take = [Math]::Min(32, $rawValue.Length)
-                $hex = if ($take -eq 0) {
-                    ""
-                }
-                else {
-                    "0x" + [BitConverter]::ToString($rawValue, 0, $take).Replace("-", "")
-                }
                 $value[$column.ColumnName] = [ordered]@{
                     binary = $true
                     bytes = $rawValue.Length
-                    firstBytesHex = $hex
                 }
             }
             else {
@@ -190,10 +174,7 @@ function Get-NeptunoRowsByReference {
             $dataType = [string]$_["dataType"]
             $quotedColumn = "[" + $columnName.Replace("]", "]]") + "]"
             if ($dataType -in @("binary", "varbinary", "image")) {
-                @(
-                    "DATALENGTH($quotedColumn) AS [" + $columnName.Replace("]", "]]") + "_bytes]",
-                    "CAST(SUBSTRING(CAST($quotedColumn AS varbinary(max)), 1, 32) AS varbinary(32)) AS [" + $columnName.Replace("]", "]]") + "_first_bytes]"
-                )
+                "DATALENGTH($quotedColumn) AS [" + $columnName.Replace("]", "]]") + "_bytes]"
             }
             elseif ($dataType -in @("text", "ntext")) {
                 "LEFT(CONVERT(nvarchar(max), $quotedColumn), 4000) AS $quotedColumn"

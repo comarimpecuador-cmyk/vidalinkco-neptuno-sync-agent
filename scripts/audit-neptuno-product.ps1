@@ -17,7 +17,7 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$OutputDirectory = "./exports/local-audit",
+    [string]$OutputDirectory = (Join-Path (Split-Path -Parent $PSScriptRoot) "exports/local-audit"),
 
     [Parameter()]
     [switch]$Export
@@ -291,19 +291,12 @@ foreach ($stock in @($tables["in_item_bodega"].rows)) {
 $sectionExport = [System.Collections.Generic.List[object]]::new()
 if ($tables.Contains("fa_seccion_vademecum")) {
     foreach ($section in @($tables["fa_seccion_vademecum"].rows)) {
-        $binary = if ($null -eq $section.PSObject.Properties["contenido_first_bytes"]) {
-            $null
-        }
-        else {
-            $section.PSObject.Properties["contenido_first_bytes"].Value
-        }
         $sectionExport.Add([pscustomobject]@{
             idVademecum = if ($null -eq $section.PSObject.Properties["id_vademecum"]) { "" } else { ConvertTo-DisplayValue $section.PSObject.Properties["id_vademecum"].Value }
             idSeccion = if ($null -eq $section.PSObject.Properties["id_seccion_vademecum"]) { "" } else { ConvertTo-DisplayValue $section.PSObject.Properties["id_seccion_vademecum"].Value }
             secuencia = if ($null -eq $section.PSObject.Properties["secuencia"]) { "" } else { ConvertTo-DisplayValue $section.PSObject.Properties["secuencia"].Value }
             nombre = if ($null -eq $section.PSObject.Properties["nombre"]) { "" } else { ConvertTo-DisplayValue $section.PSObject.Properties["nombre"].Value }
             contenidoBytes = if ($null -eq $section.PSObject.Properties["contenido_bytes"]) { "" } else { ConvertTo-DisplayValue $section.PSObject.Properties["contenido_bytes"].Value }
-            firstBytesHex = if ($binary -is [System.Collections.IDictionary]) { $binary["firstBytesHex"] } else { "" }
             status = "metadata-only-pending-reliable-decoding"
         })
     }

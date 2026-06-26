@@ -17,7 +17,7 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$OutputDirectory = "./exports/local-audit",
+    [string]$OutputDirectory = (Join-Path (Split-Path -Parent $PSScriptRoot) "exports/local-audit"),
 
     [Parameter()]
     [switch]$Export
