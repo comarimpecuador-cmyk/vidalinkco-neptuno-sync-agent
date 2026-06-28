@@ -1,11 +1,11 @@
 /*
-  NEPTUNO Phase 9A-1B live price/stock query.
-  Runtime parameters: @BodegaId (bigint), @MaxProducts (int) and optional
-  parameterized @ExternalIdN values injected at the marked filter placeholder.
+  NEPTUNO Phase 9A-1D live price/stock query.
+  Runtime parameters: @BodegaId (bigint), @BatchSize (int),
+  @StartAfterExternalId (bigint) and optional parameterized @ExternalIdN values.
   Read-only operational data only.
 */
 
-SELECT TOP (@MaxProducts)
+SELECT TOP (@BatchSize)
     CAST(i.id_item AS varchar(50)) AS externalId,
     CAST(ib.id_bodega AS varchar(50)) AS bodegaExternalId,
     CAST(b.nombre AS varchar(250)) AS bodegaNombre,
@@ -28,5 +28,6 @@ LEFT JOIN in_estado_item AS ei
     ON ei.id_estado_item = i.id_estado_item
 WHERE i.id_item IS NOT NULL
   AND i.precio IS NOT NULL
+  AND i.id_item > @StartAfterExternalId
 /*__EXTERNAL_IDS_FILTER__*/
 ORDER BY i.id_item;

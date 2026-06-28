@@ -1,7 +1,7 @@
 /*
-  NEPTUNO Phase 9A-1B catalog query.
-  Runtime parameters: @MaxProducts (int) and optional parameterized
-  @ExternalIdN values injected at the marked filter placeholder.
+  NEPTUNO Phase 9A-1D catalog query.
+  Runtime parameters: @BatchSize (int), @StartAfterExternalId (bigint) and
+  optional parameterized @ExternalIdN values injected at the marked filter.
   Read-only metadata only. Vademecum binary columns are intentionally absent.
 
   TODO pharmacy audit:
@@ -24,7 +24,7 @@ WITH vademecum_sections AS (
         ).value('.', 'varchar(max)'), 1, 1, '') AS vademecumSectionNames
     FROM fa_vademecum AS v
 )
-SELECT TOP (@MaxProducts)
+SELECT TOP (@BatchSize)
     CAST(i.id_item AS varchar(50)) AS externalId,
     CAST(i.descripcion AS varchar(250)) AS nombreOriginal,
     CAST(i.descripcion_larga AS varchar(500)) AS nombreLargo,
@@ -75,5 +75,6 @@ LEFT JOIN vademecum_sections AS vs
 WHERE i.id_item IS NOT NULL
   AND i.descripcion IS NOT NULL
   AND i.precio IS NOT NULL
+  AND i.id_item > @StartAfterExternalId
 /*__EXTERNAL_IDS_FILTER__*/
 ORDER BY i.id_item;

@@ -1,4 +1,4 @@
-# NEPTUNO Sync Agent Phase 9A-1B Permanent Runbook
+# NEPTUNO Sync Agent Phase 9A-1D Permanent Runbook
 
 ## Objetivo y alcance
 
@@ -41,6 +41,12 @@ una auditoría de esquema en la PC farmacia; no se debe adivinar el join.
 -BodegaId          default 1
 -Mode              Catalog, Live o All; default All
 -MaxProducts       límite opcional para pruebas controladas
+-BatchSize         filas máximas por query y rama; default 500
+-StartAfterExternalId  límite inferior inicial opcional para keyset
+-MaxBatches        máximo de lotes en esta invocación; deja run resumible
+-CommandTimeoutSeconds timeout SQL por lote; default 120
+-ProgressEveryBatches frecuencia del progreso visible; default 1
+-Resume            continúa el último run incompleto compatible
 -ExternalIds       IDs NEPTUNO opcionales para prueba dirigida
 -Eligibility       AllForAudit, ActiveSellable o ActiveSellableWithStock
 -OnInvalidLive     Quarantine (default) o FailFast
@@ -93,6 +99,8 @@ Desde la raíz del repositorio:
   -Mode All `
   -Eligibility ActiveSellable `
   -RunType Bootstrap `
+  -BatchSize 500 `
+  -CommandTimeoutSeconds 120 `
   -DryRun
 ```
 
@@ -105,6 +113,8 @@ No repita Bootstrap como operación normal. Después use Incremental:
   -Mode All `
   -Eligibility ActiveSellableWithStock `
   -RunType Incremental `
+  -BatchSize 500 `
+  -CommandTimeoutSeconds 120 `
   -DryRun
 ```
 
@@ -131,6 +141,72 @@ Aunque se reciba otra connection string, el script fuerza
 `ApplicationIntent=ReadOnly`. Los dos SQL se validan contra comandos mutantes
 antes de abrir la conexión.
 
+## Lotes, progreso y reanudación
+
+Catálogo y live se leen por keyset ascendente (`externalId > cursor`) con
+`TOP (@BatchSize)`. Cada rama mantiene su cursor independiente porque sus
+universos pueden tener distinta densidad. `lastProcessedExternalId` es un
+resumen; `catalogLastExternalId` y `liveLastExternalId` son los cursores
+autoritativos del checkpoint.
+
+Al completar cada lote, la consola muestra `syncRunId`, tipo, último ID,
+filas vistas, cambios, quarantine y tiempo transcurrido. El script escribe de
+forma atómica `runs/<syncRunId>/checkpoint.json` y conserva trabajo interno
+acotado bajo `work/`. Al completar, compone los artefactos finales y elimina
+`work/`.
+
+Para una prueba controlada que se detenga luego de dos lotes:
+
+```powershell
+.\scripts\sync-neptuno-catalog.ps1 `
+  -OutputDirectory ".\exports\neptuno-sync" `
+  -RunType Bootstrap `
+  -Mode All `
+  -BatchSize 500 `
+  -MaxBatches 2 `
+  -DryRun
+```
+
+El run queda `interrupted`, no actualiza `state/` ni `latest/`. Para continuar,
+repita los mismos argumentos operativos, quite `-MaxBatches` y agregue
+`-Resume`:
+
+```powershell
+.\scripts\sync-neptuno-catalog.ps1 `
+  -OutputDirectory ".\exports\neptuno-sync" `
+  -RunType Bootstrap `
+  -Mode All `
+  -BatchSize 500 `
+  -Resume `
+  -DryRun
+```
+
+`-Resume` exige coincidencia de source, run type, mode, eligibility, bodega,
+filtro de IDs y modalidad de envío. Reutiliza el `syncRunId`, `BatchSize`,
+inicio y límite del checkpoint; no reprocesa lotes ya confirmados. Si se detiene
+con `Ctrl+C`, el último checkpoint atómico puede conservar `running`; también es
+elegible para `-Resume`. `StartAfterExternalId` sirve para una auditoría o
+partición deliberada, no sustituye el checkpoint.
+
+Un timeout o error deja el run `failed`, con summary/checkpoint parcial y sin
+cambiar `state/` ni `latest/`. `latest/sync-summary.json` apunta exclusivamente
+al último run `completed`.
+
+Verificación operativa:
+
+```powershell
+$latest = Get-Content ".\exports\neptuno-sync\latest\sync-summary.json" -Raw | ConvertFrom-Json
+$latest.status
+Get-Content ".\exports\neptuno-sync\runs\$($latest.syncRunId)\checkpoint.json" -Raw
+
+$current = Get-ChildItem ".\exports\neptuno-sync\runs" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+Get-Content (Join-Path $current.FullName "checkpoint.json") -Raw
+```
+
+El primer valor debe ser `completed`. El segundo bloque inspecciona el run más
+reciente aunque esté `running`, `interrupted` o `failed`; no confunda ese run
+con el puntero estable `latest`.
+
 ## Estado, cursors y evidencia retenida
 
 No se crean payloads sueltos en la raíz. La estructura es:
@@ -141,6 +217,7 @@ exports/neptuno-sync/
     fingerprints.json
     cursors.json
   runs/<syncRunId>/
+    checkpoint.json
     catalog-payload.json
     live-payload.json
     changed-products.json
@@ -148,13 +225,15 @@ exports/neptuno-sync/
     sync-summary.json
     sync-events.ndjson
     sync-warnings.ndjson
+    work/                 # solo mientras running/interrupted/failed
   latest/
     sync-summary.json
 ```
 
-`RetentionRuns` conserva los runs más recientes y borra solamente directorios
-viejos bajo `runs/`. Nunca borra `state/`. Quarantine es evidencia de calidad,
-no basura; queda sujeto a la misma retención auditable del run.
+`RetentionRuns` conserva los runs terminales más recientes y borra solamente
+runs viejos con estado `completed` o `failed`. Nunca borra `running`,
+`interrupted` ni `state/`. Quarantine es evidencia de calidad, no basura; queda
+sujeto a la misma retención auditable del run.
 
 Los fingerprints excluyen timestamps volátiles, normalizan strings con `Trim`,
 mantienen `null` estable y ordenan propiedades antes de SHA-256. Con
@@ -179,8 +258,10 @@ repo no confirma una columna global confiable como `aud_mod_fecha_hora` o
 `fecha_modificacion` en las tablas principales. Las fechas de última venta,
 compra, transacción o ajuste son eventos operativos parciales, no un cursor
 completo. Por eso la estrategia actual es
-`eligible-scan-fingerprint-fallback`: lectura elegible y salida solo de hashes
-cambiados. Los high-watermarks permanecen `null` hasta una auditoría fiable.
+`external-id-keyset-batches-with-fingerprint-fallback`: el ID ordena y permite
+reanudar la lectura, mientras el fingerprint determina el delta real. Los
+high-watermarks guardan el último ID recorrido por catálogo/live; no se
+interpretan como timestamp de modificación ni reemplazan los fingerprints.
 
 ## Contrato de envío opt-in
 
@@ -292,10 +373,11 @@ contrato documentado por el proveedor, seguido de revisión humana.
 .\scripts\smoke-neptuno-sync-payload.ps1
 ```
 
-El smoke usa fixture sintético, no abre SQL y no envía red. El envío exitoso se
-simula con un switch interno no operativo. Valida Bootstrap, Incremental, Audit,
-confirmación de state, separación catálogo/live, negativos, ExternalIds,
-elegibilidad, FailFast, retención, Git ignore y seguridad de payload.
+El smoke usa fixture sintético, no abre SQL y no envía red. El envío exitoso y
+el timeout se simulan con switches internos no operativos. Valida Bootstrap,
+Incremental, Audit, keyset por lotes, checkpoint, interrupción/reanudación,
+aislamiento de fallos, `StartAfterExternalId`, confirmación de state, separación
+catálogo/live, negativos, ExternalIds, retención y seguridad de payload.
 
 Salida esperada:
 
@@ -304,6 +386,7 @@ NEPTUNO sync payload smoke passed.
 PowerShell parser: OK
 SELECT-only SQL: OK
 Bootstrap and incremental fingerprints: OK
+Keyset batching, checkpoint, resume and timeout isolation: OK
 Dry-run preserves pending send delta: OK
 Successful send confirms state: OK
 Catalog/live delta separation: OK
@@ -313,6 +396,7 @@ Missing and empty ExternalIds binding: OK
 Audit no-send behavior: OK
 FailFast policy: OK
 Run retention and permanent state: OK
+StartAfterExternalId lower bound: OK
 Git ignore for exports: OK
 Payload safety: OK
 Dry-run network isolation: OK
@@ -322,6 +406,8 @@ Send credential guards: OK
 ## Riesgos y próximos pasos
 
 - Ejecutar Bootstrap una vez y revisar su run antes de usar Incremental.
+- Mantener `BatchSize=500` inicialmente y ajustar solo con evidencia de tiempo/carga.
+- Reanudar runs incompletos antes de iniciar otro Bootstrap sobre la misma salida.
 - Usar `-MaxProducts` solo en una salida de prueba o Audit; no como filtro de negocio.
 - Revisar payloads y nombres de campos contra resultados reales.
 - Resolver el TODO de `pa_item_catalogo` mediante auditoría de esquema.

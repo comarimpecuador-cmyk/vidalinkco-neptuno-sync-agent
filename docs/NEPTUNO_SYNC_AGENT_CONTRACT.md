@@ -9,14 +9,14 @@ envio manual de stock/precio desde CSV local y envio manual de catalogo desde
 CSV local. Ese runner no conecta todavia a SQL Server ni instala Windows
 Service.
 
-La Fase 9A-1B agrega, de forma separada y aditiva, el script PowerShell
+La Fase 9A-1D agrega, de forma separada y aditiva, el script PowerShell
 `scripts/sync-neptuno-catalog.ps1`. Este script consulta SQL Server con
 `ApplicationIntent=ReadOnly` y SQL `SELECT`-only, genera snapshots y delta
 incremental local, y permanece en dry-run salvo `-Send` explicito. Su operación
 permanente es `Bootstrap` una sola vez, seguida por `Incremental`; `Audit` nunca
 envía ni altera el state. No reemplaza los runners CSV ni sus endpoints.
 
-## Contrato delta Fase 9A-1B
+## Contrato delta Fase 9A-1D
 
 El artefacto `changed-products.json` y el body opcional de `-Send` usan:
 
@@ -60,7 +60,18 @@ El estado permanente vive bajo `OutputDirectory/state`: `fingerprints.json`
 separa observado de enviado y `cursors.json` registra sync/send timestamps,
 high-watermarks, estrategia y confianza. No hay una columna global de auditoria
 confirmada en las tablas principales; la estrategia vigente es
-`eligible-scan-fingerprint-fallback` con high-watermarks nulos.
+`external-id-keyset-batches-with-fingerprint-fallback`. Los high-watermarks de
+ID permiten recorrer y reanudar por lotes; el fingerprint sigue siendo la
+autoridad para decidir si existe delta.
+
+Las queries de catálogo y live están ordenadas por external ID, usan
+`TOP (@BatchSize)` y cursores independientes. Cada run mantiene
+`runs/<syncRunId>/checkpoint.json` con tipo, modo, eligibility, último ID por
+rama, conteos, lotes, timestamps y estado `running`, `interrupted`, `failed` o
+`completed`. `-Resume` continúa un run compatible sobre el mismo `syncRunId`.
+Un run incompleto o fallido no confirma fingerprints/cursors permanentes y no
+reemplaza `latest/sync-summary.json`; `latest` representa solamente un run
+completado. La retención nunca elimina runs `running` o `interrupted`.
 
 El endpoint delta no se hardcodea: debe proporcionarse por `-ApiUrl` o
 `VIDALINKCO_NEPTUNO_SYNC_URL`, debe usar HTTPS y debe responder con el envelope

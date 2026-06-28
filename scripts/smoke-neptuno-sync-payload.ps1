@@ -171,6 +171,14 @@ function Get-LatestRunDirectory {
     return $runDirectory
 }
 
+function Get-NewestRunDirectory {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $run = @(Get-ChildItem -LiteralPath (Join-Path $Root "runs") -Directory | Sort-Object Name -Descending)[0]
+    Assert-True -Condition ($null -ne $run) -Message "No run directory exists in '$Root'."
+    return $run.FullName
+}
+
 Assert-PowerShellParser -Path $mainScript
 Assert-PowerShellParser -Path $PSCommandPath
 Assert-SelectOnlySqlFile -Path $catalogSqlPath
@@ -231,6 +239,7 @@ $commonArguments = @{
     Mode = "All"
     Eligibility = "AllForAudit"
     OnInvalidLive = "Quarantine"
+    BatchSize = 2
     DryRun = $true
     ApiUrl = "https://127.0.0.1:1/must-not-connect"
     ApiToken = "smoke-value-never-sent"
@@ -246,6 +255,7 @@ $live1 = Get-Content -Raw -LiteralPath (Join-Path $bootstrapRun "live-payload.js
 $delta1 = Get-Content -Raw -LiteralPath (Join-Path $bootstrapRun "changed-products.json") -Encoding UTF8 | ConvertFrom-Json
 $quarantine1 = Get-Content -Raw -LiteralPath (Join-Path $bootstrapRun "quarantine-items.json") -Encoding UTF8 | ConvertFrom-Json
 Assert-True -Condition ($summary1.runType -eq "Bootstrap") -Message "Bootstrap run type was not recorded."
+Assert-True -Condition ($summary1.status -eq "completed" -and $summary1.batchesCompleted -eq 4) -Message "Bootstrap did not complete in deterministic keyset batches."
 Assert-True -Condition ($summary1.externalIdsFilterApplied -eq $false) -Message "Missing ExternalIds was serialized as an applied filter."
 Assert-True -Condition ($summary1.dryRun -eq $true -and $summary1.sendAttempted -eq $false) -Message "Dry-run attempted network send."
 Assert-True -Condition ($summary1.changedCatalogItems -eq 6 -and $summary1.changedLiveItems -eq 5) -Message "Initial changed-products detection failed."
@@ -266,7 +276,56 @@ Assert-True -Condition (@($quarantine1.items | Where-Object { $_.reason -eq "NEG
 Assert-True -Condition (@($quarantine1.items | Where-Object { $_.reason -eq "NEGATIVE_STOCK_CLAMPED" -and $_.externalId -eq "1982" }).Count -eq 1) -Message "Negative stock warning record is missing."
 Assert-True -Condition ($null -ne $cursors1.lastCatalogSyncAt -and $null -ne $cursors1.lastLiveSyncAt) -Message "Bootstrap cursors were not created."
 Assert-True -Condition ($null -eq $cursors1.lastSuccessfulSendAt) -Message "Bootstrap dry-run incorrectly confirmed a send cursor."
-Assert-True -Condition ($cursors1.queryStrategy.catalog -eq "eligible-scan-fingerprint-fallback") -Message "Cursor fallback strategy is missing."
+Assert-True -Condition ($cursors1.queryStrategy.catalog -eq "external-id-keyset-batches-with-fingerprint-fallback") -Message "Cursor fallback strategy is missing."
+Assert-True -Condition (-not [System.IO.Directory]::Exists((Join-Path $bootstrapRun "work"))) -Message "Completed run retained internal batch work files."
+$bootstrapCheckpoint = Get-Content -Raw -LiteralPath (Join-Path $bootstrapRun "checkpoint.json") -Encoding UTF8 | ConvertFrom-Json
+Assert-True -Condition ($bootstrapCheckpoint.status -eq "completed" -and $bootstrapCheckpoint.lastProcessedExternalId -eq 9102) -Message "Completed checkpoint is invalid."
+Assert-True -Condition ($bootstrapCheckpoint.counts.catalogRowsSeen -eq 6 -and $bootstrapCheckpoint.counts.liveChanged -eq 5) -Message "Checkpoint counts are incomplete."
+
+$resumeOutput = Join-Path $resolvedOutputDirectory "resume"
+$resumeArguments = $commonArguments.Clone()
+$resumeArguments["OutputDirectory"] = $resumeOutput
+$resumeArguments["RunType"] = "Bootstrap"
+$resumeArguments["RebuildState"] = $true
+$resumeArguments["MaxBatches"] = 1
+& $mainScript @resumeArguments
+$interruptedRun = Get-NewestRunDirectory -Root $resumeOutput
+$interruptedCheckpoint = Get-Content -Raw -LiteralPath (Join-Path $interruptedRun "checkpoint.json") -Encoding UTF8 | ConvertFrom-Json
+Assert-True -Condition ($interruptedCheckpoint.status -eq "interrupted" -and $interruptedCheckpoint.batchesCompleted -eq 1) -Message "MaxBatches did not create a resumable interrupted checkpoint."
+Assert-True -Condition (-not [System.IO.File]::Exists((Join-Path $resumeOutput "latest/sync-summary.json"))) -Message "Interrupted run incorrectly replaced latest."
+Assert-True -Condition (-not [System.IO.File]::Exists((Join-Path $resumeOutput "state/fingerprints.json"))) -Message "Interrupted run committed permanent state."
+Assert-True -Condition ([System.IO.Directory]::Exists((Join-Path $interruptedRun "work"))) -Message "Interrupted run lost resumable batch work."
+[void]$resumeArguments.Remove("MaxBatches")
+$resumeArguments["Resume"] = $true
+& $mainScript @resumeArguments
+$resumedRun = Get-LatestRunDirectory -Root $resumeOutput
+$resumedSummary = Get-Content -Raw -LiteralPath (Join-Path $resumedRun "sync-summary.json") -Encoding UTF8 | ConvertFrom-Json
+Assert-True -Condition ($resumedRun -eq $interruptedRun -and $resumedSummary.status -eq "completed" -and $resumedSummary.resumed -eq $true) -Message "Resume did not complete the original run."
+Assert-True -Condition ($resumedSummary.changedCatalogItems -eq 6 -and $resumedSummary.changedLiveItems -eq 5) -Message "Resume lost changed items from earlier batches."
+Assert-True -Condition ([System.IO.File]::Exists((Join-Path $resumeOutput "state/fingerprints.json"))) -Message "Resumed Bootstrap did not commit baseline state."
+
+$timeoutOutput = Join-Path $resolvedOutputDirectory "timeout"
+$timeoutArguments = $commonArguments.Clone()
+$timeoutArguments["OutputDirectory"] = $timeoutOutput
+& $mainScript @timeoutArguments -RunType "Bootstrap" -RebuildState
+$timeoutLatestBefore = Get-Content -Raw -LiteralPath (Join-Path $timeoutOutput "latest/sync-summary.json") -Encoding UTF8 | ConvertFrom-Json
+$timeoutStateBefore = Get-Content -Raw -LiteralPath (Join-Path $timeoutOutput "state/fingerprints.json") -Encoding UTF8
+$timeoutRejected = $false
+try {
+    & $mainScript @timeoutArguments -RunType "Incremental" -MockTimeoutAtBatch 1 -CommandTimeoutSeconds 7
+}
+catch {
+    $timeoutRejected = $_.Exception.Message -match 'timeout|timed out'
+}
+Assert-True -Condition $timeoutRejected -Message "Mock command timeout did not fail clearly."
+$timeoutFailedRun = Get-NewestRunDirectory -Root $timeoutOutput
+$timeoutCheckpoint = Get-Content -Raw -LiteralPath (Join-Path $timeoutFailedRun "checkpoint.json") -Encoding UTF8 | ConvertFrom-Json
+$timeoutSummary = Get-Content -Raw -LiteralPath (Join-Path $timeoutFailedRun "sync-summary.json") -Encoding UTF8 | ConvertFrom-Json
+$timeoutLatestAfter = Get-Content -Raw -LiteralPath (Join-Path $timeoutOutput "latest/sync-summary.json") -Encoding UTF8 | ConvertFrom-Json
+$timeoutStateAfter = Get-Content -Raw -LiteralPath (Join-Path $timeoutOutput "state/fingerprints.json") -Encoding UTF8
+Assert-True -Condition ($timeoutCheckpoint.status -eq "failed" -and $timeoutSummary.status -eq "failed" -and $timeoutSummary.commandTimeoutSeconds -eq 7) -Message "Timeout failure evidence is incomplete."
+Assert-True -Condition ($timeoutLatestAfter.syncRunId -eq $timeoutLatestBefore.syncRunId) -Message "Failed timeout run replaced latest."
+Assert-True -Condition ($timeoutStateAfter -eq $timeoutStateBefore) -Message "Failed timeout run modified permanent state."
 
 & $mainScript @commonArguments -RunType "Incremental"
 $incrementalRun = Get-LatestRunDirectory -Root $runOutput
@@ -338,6 +397,18 @@ $emptyFilterRun = Get-LatestRunDirectory -Root $emptyFilterOutput
 $emptyFilterSummary = Get-Content -Raw -LiteralPath (Join-Path $emptyFilterRun "sync-summary.json") -Encoding UTF8 | ConvertFrom-Json
 Assert-True -Condition ($emptyFilterSummary.externalIdsFilterApplied -eq $false -and $emptyFilterSummary.catalogItems -eq 6) -Message "Empty ExternalIds did not behave as no filter."
 
+$startAfterOutput = Join-Path $resolvedOutputDirectory "start-after"
+$startAfterArguments = $commonArguments.Clone()
+$startAfterArguments["OutputDirectory"] = $startAfterOutput
+$startAfterArguments["RunType"] = "Audit"
+$startAfterArguments["StartAfterExternalId"] = 4000
+& $mainScript @startAfterArguments
+$startAfterRun = Get-LatestRunDirectory -Root $startAfterOutput
+$startAfterCheckpoint = Get-Content -Raw -LiteralPath (Join-Path $startAfterRun "checkpoint.json") -Encoding UTF8 | ConvertFrom-Json
+$startAfterCatalog = Get-Content -Raw -LiteralPath (Join-Path $startAfterRun "catalog-payload.json") -Encoding UTF8 | ConvertFrom-Json
+Assert-True -Condition (@($startAfterCatalog.items).Count -eq 3 -and @($startAfterCatalog.items | Where-Object { [long]$_.externalId -le 4000 }).Count -eq 0) -Message "StartAfterExternalId did not apply the keyset lower bound."
+Assert-True -Condition ($startAfterCheckpoint.initialStartAfterExternalId -eq 4000 -and $startAfterCheckpoint.status -eq "completed") -Message "StartAfterExternalId checkpoint evidence is invalid."
+
 $withStockOutput = Join-Path $resolvedOutputDirectory "active-with-stock"
 $withStockArguments = $commonArguments.Clone()
 $withStockArguments["OutputDirectory"] = $withStockOutput
@@ -363,9 +434,10 @@ catch {
     $failFastRejected = $_.Exception.Message -match 'FailFast'
 }
 Assert-True -Condition $failFastRejected -Message "OnInvalidLive=FailFast did not reject negative price."
-$failFastRun = Get-LatestRunDirectory -Root $failFastOutput
+$failFastRun = Get-NewestRunDirectory -Root $failFastOutput
 $failFastSummary = Get-Content -Raw -LiteralPath (Join-Path $failFastRun "sync-summary.json") -Encoding UTF8 | ConvertFrom-Json
-Assert-True -Condition ($failFastSummary.stateUpdated -eq $false -and $failFastSummary.negativePriceItems -eq 1) -Message "FailFast summary is incomplete."
+Assert-True -Condition ($failFastSummary.status -eq "failed" -and $failFastSummary.stateUpdated -eq $false -and $failFastSummary.negativePriceItems -eq 1) -Message "FailFast summary is incomplete."
+Assert-True -Condition (-not [System.IO.File]::Exists((Join-Path $failFastOutput "latest/sync-summary.json"))) -Message "Failed FailFast run incorrectly created latest."
 
 $retentionOutput = Join-Path $resolvedOutputDirectory "retention"
 $retentionArguments = $commonArguments.Clone()
@@ -376,8 +448,14 @@ $retentionArguments["RetentionRuns"] = 2
     $retentionArguments["RunType"] = $(if ($_ -eq 1) { "Bootstrap" } else { "Incremental" })
     & $mainScript @retentionArguments
 }
+$retentionInterruptedArguments = $retentionArguments.Clone()
+[void]$retentionInterruptedArguments.Remove("ExternalIds")
+$retentionInterruptedArguments["RunType"] = "Incremental"
+$retentionInterruptedArguments["MaxBatches"] = 1
+& $mainScript @retentionInterruptedArguments
 $retainedRuns = @(Get-ChildItem -LiteralPath (Join-Path $retentionOutput "runs") -Directory)
-Assert-True -Condition ($retainedRuns.Count -eq 2) -Message "RetentionRuns did not remove old run directories."
+$retainedStatuses = @($retainedRuns | ForEach-Object { (Get-Content -Raw -LiteralPath (Join-Path $_.FullName "checkpoint.json") -Encoding UTF8 | ConvertFrom-Json).status })
+Assert-True -Condition ($retainedRuns.Count -eq 3 -and @($retainedStatuses | Where-Object { $_ -eq "interrupted" }).Count -eq 1) -Message "RetentionRuns did not retain two terminal runs plus the interrupted run."
 Assert-True -Condition ([System.IO.File]::Exists((Join-Path $retentionOutput "state/fingerprints.json"))) -Message "Retention removed permanent fingerprint state."
 Assert-True -Condition ([System.IO.File]::Exists((Join-Path $retentionOutput "state/cursors.json"))) -Message "Retention removed permanent cursors."
 
@@ -436,6 +514,7 @@ Write-Host "NEPTUNO sync payload smoke passed."
 Write-Host "PowerShell parser: OK"
 Write-Host "SELECT-only SQL: OK"
 Write-Host "Bootstrap and incremental fingerprints: OK"
+Write-Host "Keyset batching, checkpoint, resume and timeout isolation: OK"
 Write-Host "Dry-run preserves pending send delta: OK"
 Write-Host "Successful send confirms state: OK"
 Write-Host "Catalog/live delta separation: OK"
@@ -445,6 +524,7 @@ Write-Host "Missing and empty ExternalIds binding: OK"
 Write-Host "Audit no-send behavior: OK"
 Write-Host "FailFast policy: OK"
 Write-Host "Run retention and permanent state: OK"
+Write-Host "StartAfterExternalId lower bound: OK"
 Write-Host "Separate Catalog/Live state preservation: OK"
 Write-Host "Git ignore for exports: OK"
 Write-Host "No loose root artifacts: OK"
