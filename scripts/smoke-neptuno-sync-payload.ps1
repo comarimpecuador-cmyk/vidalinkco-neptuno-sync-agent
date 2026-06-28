@@ -189,6 +189,8 @@ $normalizedMissingIds = Get-NormalizedExternalIds -Values @()
 Assert-True -Condition ($null -eq $normalizedMissingIds) -Message "Empty ExternalIds did not normalize to null."
 $normalizedIds = @(Get-NormalizedExternalIds -Values @(" 9102 ", "9102,1982", "", "1982"))
 Assert-True -Condition ($normalizedIds.Count -eq 2 -and $normalizedIds[0] -eq "9102" -and $normalizedIds[1] -eq "1982") -Message "ExternalIds trim/dedup normalization failed."
+$normalizedSingleId = @(Get-NormalizedExternalIds -Values @(" 9102 "))
+Assert-True -Condition ($normalizedSingleId.Count -eq 1 -and $normalizedSingleId[0] -eq "9102") -Message "Single ExternalIds normalization did not preserve array semantics."
 $unfilteredSql = Add-ExternalIdsSqlFilter -Sql "SELECT 1 WHERE 1 = 1 /*__EXTERNAL_IDS_FILTER__*/;" -Parameters @{} -Ids $normalizedMissingIds
 Assert-True -Condition ($unfilteredSql.Sql -notmatch 'EXTERNAL_IDS_FILTER' -and $unfilteredSql.Parameters.Count -eq 0) -Message "Empty ExternalIds SQL binding failed."
 
@@ -371,6 +373,35 @@ $liveAfterCatalogChange = Get-Content -Raw -LiteralPath (Join-Path $catalogChang
 Assert-True -Condition ($summary3.changedCatalogItems -eq 1 -and $summary3.changedLiveItems -eq 0) -Message "Master data change did not produce catalog-only delta."
 Assert-True -Condition (@($catalogChangePayload.items).Count -eq 1 -and @($liveAfterCatalogChange.items).Count -eq 0) -Message "Master data incremental payload is not catalog-only."
 
+$singleOutput = Join-Path $resolvedOutputDirectory "single-external-id"
+$singleArguments = $commonArguments.Clone()
+$singleArguments["OutputDirectory"] = $singleOutput
+$singleArguments["ExternalIds"] = @("9102")
+$singleArguments["RunType"] = "Audit"
+& $mainScript @singleArguments
+$singleRun = Get-LatestRunDirectory -Root $singleOutput
+$singleSummary = Get-Content -Raw -LiteralPath (Join-Path $singleRun "sync-summary.json") -Encoding UTF8 | ConvertFrom-Json
+$singleCatalog = Get-Content -Raw -LiteralPath (Join-Path $singleRun "catalog-payload.json") -Encoding UTF8 | ConvertFrom-Json
+$singleLive = Get-Content -Raw -LiteralPath (Join-Path $singleRun "live-payload.json") -Encoding UTF8 | ConvertFrom-Json
+$singleDelta = Get-Content -Raw -LiteralPath (Join-Path $singleRun "changed-products.json") -Encoding UTF8 | ConvertFrom-Json
+Assert-True -Condition ($singleSummary.status -eq "completed" -and $singleSummary.catalogItems -eq 1 -and $singleSummary.liveItems -eq 1) -Message "Single-row Audit did not complete with stable collection counts."
+Assert-True -Condition (@($singleCatalog.items).Count -eq 1 -and @($singleLive.items).Count -eq 1) -Message "Single-row Audit payload shape is invalid."
+Assert-True -Condition ($singleDelta.contractVersion -eq 2 -and $null -ne $singleDelta.PSObject.Properties["catalogChangedItems"] -and $null -ne $singleDelta.PSObject.Properties["liveChangedItems"]) -Message "Single-row Audit changed-products contract v2 is invalid."
+Assert-True -Condition (-not [System.IO.File]::Exists((Join-Path $singleOutput "state/fingerprints.json")) -and -not [System.IO.File]::Exists((Join-Path $singleOutput "state/cursors.json"))) -Message "Single-row Audit modified permanent state."
+
+$zeroOutput = Join-Path $resolvedOutputDirectory "zero-records"
+$zeroArguments = $commonArguments.Clone()
+$zeroArguments["OutputDirectory"] = $zeroOutput
+$zeroArguments["ExternalIds"] = @("999999")
+$zeroArguments["RunType"] = "Audit"
+& $mainScript @zeroArguments
+$zeroRun = Get-LatestRunDirectory -Root $zeroOutput
+$zeroSummary = Get-Content -Raw -LiteralPath (Join-Path $zeroRun "sync-summary.json") -Encoding UTF8 | ConvertFrom-Json
+$zeroCatalog = Get-Content -Raw -LiteralPath (Join-Path $zeroRun "catalog-payload.json") -Encoding UTF8 | ConvertFrom-Json
+$zeroLive = Get-Content -Raw -LiteralPath (Join-Path $zeroRun "live-payload.json") -Encoding UTF8 | ConvertFrom-Json
+Assert-True -Condition ($zeroSummary.status -eq "completed" -and $zeroSummary.catalogItems -eq 0 -and $zeroSummary.liveItems -eq 0) -Message "Zero-row Audit did not complete with zero counts."
+Assert-True -Condition (@($zeroCatalog.items).Count -eq 0 -and @($zeroLive.items).Count -eq 0) -Message "Zero-row Audit payload arrays are invalid."
+
 $filteredOutput = Join-Path $resolvedOutputDirectory "external-ids"
 $filteredArguments = $commonArguments.Clone()
 $filteredArguments["OutputDirectory"] = $filteredOutput
@@ -520,6 +551,7 @@ Write-Host "Successful send confirms state: OK"
 Write-Host "Catalog/live delta separation: OK"
 Write-Host "Negative live quarantine and stock clamp: OK"
 Write-Host "ExternalIds and eligibility filters: OK"
+Write-Host "Zero, single and multiple row collection semantics: OK"
 Write-Host "Missing and empty ExternalIds binding: OK"
 Write-Host "Audit no-send behavior: OK"
 Write-Host "FailFast policy: OK"

@@ -141,6 +141,12 @@ Aunque se reciba otra connection string, el script fuerza
 `ApplicationIntent=ReadOnly`. Los dos SQL se validan contra comandos mutantes
 antes de abrir la conexión.
 
+Las queries operativas no dependen de `TRY_CONVERT` ni `TRY_CAST`, funciones no
+disponibles en la versión de SQL Server observada en farmacia. El keyset compara
+directamente la columna nativa numérica `i.id_item` con
+`@StartAfterExternalId`. Para una consulta auxiliar, use también el tipo nativo
+confirmado; no convierta texto arbitrario ni agregue `TRY_CONVERT`.
+
 ## Lotes, progreso y reanudación
 
 Catálogo y live se leen por keyset ascendente (`externalId > cursor`) con

@@ -231,7 +231,13 @@ function Add-ExternalIdsSqlFilter {
     if (-not $Sql.Contains($placeholder)) {
         throw "SQL query is missing the external IDs filter placeholder."
     }
-    if ($null -eq $Ids -or @($Ids).Count -eq 0) {
+    $normalizedIds = [System.Collections.Generic.List[string]]::new()
+    foreach ($id in @($Ids)) {
+        if ($null -ne $id) {
+            $normalizedIds.Add([string]$id)
+        }
+    }
+    if ($normalizedIds.Count -eq 0) {
         return [pscustomobject]@{
             Sql = $Sql.Replace($placeholder, '')
             Parameters = $Parameters
@@ -239,9 +245,9 @@ function Add-ExternalIdsSqlFilter {
     }
 
     $parameterNames = [System.Collections.Generic.List[string]]::new()
-    for ($index = 0; $index -lt $Ids.Count; $index++) {
+    for ($index = 0; $index -lt $normalizedIds.Count; $index++) {
         $name = "ExternalId$index"
-        $Parameters[$name] = $Ids[$index]
+        $Parameters[$name] = $normalizedIds[$index]
         $parameterNames.Add("@$name")
     }
     $filter = "AND CAST(i.id_item AS varchar(50)) IN (" + ($parameterNames -join ', ') + ")"
@@ -641,14 +647,18 @@ function Add-NdjsonEvents {
         [Parameter()][object[]]$Events = @()
     )
 
-    if ($Events.Count -eq 0) {
+    $normalizedEvents = [System.Collections.Generic.List[object]]::new()
+    foreach ($event in @($Events)) {
+        if ($null -ne $event) { $normalizedEvents.Add($event) }
+    }
+    if ($normalizedEvents.Count -eq 0) {
         if (-not [System.IO.File]::Exists($Path)) {
             [System.IO.File]::WriteAllText($Path, "", [System.Text.UTF8Encoding]::new($false))
         }
         return
     }
     $lines = [System.Collections.Generic.List[string]]::new()
-    foreach ($event in $Events) {
+    foreach ($event in $normalizedEvents) {
         Assert-SafePayload -Value $event -Path '$.event'
         $lines.Add(($event | ConvertTo-Json -Compress -Depth 10))
     }
@@ -912,7 +922,18 @@ $cursorPath = Join-Path $stateDirectory "cursors.json"
 $runsDirectory = Join-Path $resolvedOutputDirectory "runs"
 $latestDirectory = Join-Path $resolvedOutputDirectory "latest"
 $capturedAt = [DateTimeOffset]::UtcNow.ToString("o")
-$normalizedExternalIds = Get-NormalizedExternalIds -Values $ExternalIds
+$normalizedExternalIdList = [System.Collections.Generic.List[string]]::new()
+foreach ($normalizedExternalId in @(Get-NormalizedExternalIds -Values $ExternalIds)) {
+    if ($null -ne $normalizedExternalId) {
+        $normalizedExternalIdList.Add([string]$normalizedExternalId)
+    }
+}
+if ($normalizedExternalIdList.Count -eq 0) {
+    $normalizedExternalIds = $null
+}
+else {
+    $normalizedExternalIds = $normalizedExternalIdList.ToArray()
+}
 $externalIdsFilterApplied = $null -ne $normalizedExternalIds
 $externalIdsKey = if ($externalIdsFilterApplied) { @($normalizedExternalIds) -join "," } else { "" }
 [System.IO.Directory]::CreateDirectory($resolvedOutputDirectory) | Out-Null
@@ -1149,8 +1170,8 @@ try {
             throw [TimeoutException]::new("Mock SQL batch exceeded CommandTimeoutSeconds=$CommandTimeoutSeconds.")
         }
 
-        $catalogRows = @()
-        $liveRows = @()
+        [object[]]$catalogRows = @()
+        [object[]]$liveRows = @()
         $catalogTake = [Math]::Min($BatchSize, $effectiveMaxProducts - $catalogItemsSeen)
         $liveTake = [Math]::Min($BatchSize, $effectiveMaxProducts - $liveItemsSeen)
         if ($catalogEnabled -and -not $catalogComplete) {
@@ -1169,7 +1190,7 @@ try {
                     StartAfterExternalId = $catalogLastExternalId
                 } -Ids $normalizedExternalIds
                 Assert-ReadOnlySql -Sql $catalogQuery.Sql -Name "neptuno-sync-catalog-query.sql (runtime)"
-                $catalogRows = Invoke-NeptunoSelectRows -SafeConnectionString $safeConnectionString -Sql $catalogQuery.Sql -Parameters $catalogQuery.Parameters -CommandTimeoutSeconds $CommandTimeoutSeconds
+                $catalogRows = @(Invoke-NeptunoSelectRows -SafeConnectionString $safeConnectionString -Sql $catalogQuery.Sql -Parameters $catalogQuery.Parameters -CommandTimeoutSeconds $CommandTimeoutSeconds)
             }
         }
         if ($liveEnabled -and -not $liveComplete) {
@@ -1190,9 +1211,16 @@ try {
                     StartAfterExternalId = $liveLastExternalId
                 } -Ids $normalizedExternalIds
                 Assert-ReadOnlySql -Sql $liveQuery.Sql -Name "neptuno-sync-live-query.sql (runtime)"
-                $liveRows = Invoke-NeptunoSelectRows -SafeConnectionString $safeConnectionString -Sql $liveQuery.Sql -Parameters $liveQuery.Parameters -CommandTimeoutSeconds $CommandTimeoutSeconds
+                $liveRows = @(Invoke-NeptunoSelectRows -SafeConnectionString $safeConnectionString -Sql $liveQuery.Sql -Parameters $liveQuery.Parameters -CommandTimeoutSeconds $CommandTimeoutSeconds)
             }
         }
+
+        # PowerShell 5.1 unwraps single pipeline results. Keep both branches as
+        # arrays before Count, iteration and cumulative accounting.
+        [object[]]$catalogRows = @($catalogRows)
+        [object[]]$liveRows = @($liveRows)
+        $catalogRowCount = $catalogRows.Count
+        $liveRowCount = $liveRows.Count
 
         $batchCatalogPayload = [System.Collections.Generic.List[object]]::new()
         $batchCatalogChanged = [System.Collections.Generic.List[object]]::new()
@@ -1207,7 +1235,7 @@ try {
         $batchLiveEligibleCount = 0
         $failFastViolation = $false
 
-        foreach ($row in $catalogRows) {
+        foreach ($row in @($catalogRows)) {
             $item = New-CatalogItem -Row $row -ItemSourceKey $SourceKey
             $hash = Get-StableFingerprint -Value (Get-CatalogFingerprintProjection -Item $item)
             $changed = -not $catalogComparison.ContainsKey($item.externalId) -or $catalogComparison[$item.externalId] -ne $hash -or $baselineReset
@@ -1217,7 +1245,7 @@ try {
             if ($Send) { $nextSentCatalog[$item.externalId] = $hash }
         }
 
-        foreach ($row in $liveRows) {
+        foreach ($row in @($liveRows)) {
             $evaluation = Get-LiveItemEvaluation -Row $row -ItemSourceKey $SourceKey -CapturedAt $capturedAt -EligibilityPolicy $Eligibility
             $itemKey = "$($evaluation.item.externalId)|$($evaluation.item.bodegaExternalId)"
             if ($evaluation.negativeStock) {
@@ -1287,8 +1315,8 @@ try {
         Write-NdjsonBatchFile -Path (Join-Path $batchWorkDirectory "$batchPrefix.events.ndjson") -Items $batchEvents.ToArray()
         Write-NdjsonBatchFile -Path (Join-Path $batchWorkDirectory "$batchPrefix.warnings.ndjson") -Items $batchWarnings.ToArray()
 
-        $catalogItemsSeen += $catalogRows.Count
-        $liveItemsSeen += $liveRows.Count
+        $catalogItemsSeen += $catalogRowCount
+        $liveItemsSeen += $liveRowCount
         $liveEligibleSeen += $batchLiveEligibleCount
         $catalogChangedSeen += $batchCatalogChanged.Count
         $liveChangedSeen += $batchLiveChanged.Count
@@ -1296,14 +1324,14 @@ try {
         $warningsSeen += $batchWarnings.Count
         $negativePriceSeen += $batchNegativePriceKeys.Count
         $negativeStockSeen += $batchNegativeStockKeys.Count
-        if ($catalogRows.Count -gt 0) {
+        if ($catalogRowCount -gt 0) {
             $catalogLastExternalId = [long](($catalogRows | ForEach-Object { [long](Get-RowValue -Row $_ -Name "externalId") } | Measure-Object -Maximum).Maximum)
         }
-        if ($liveRows.Count -gt 0) {
+        if ($liveRowCount -gt 0) {
             $liveLastExternalId = [long](($liveRows | ForEach-Object { [long](Get-RowValue -Row $_ -Name "externalId") } | Measure-Object -Maximum).Maximum)
         }
-        if ($catalogEnabled -and ($catalogRows.Count -lt $catalogTake -or $catalogItemsSeen -ge $effectiveMaxProducts)) { $catalogComplete = $true }
-        if ($liveEnabled -and ($liveRows.Count -lt $liveTake -or $liveItemsSeen -ge $effectiveMaxProducts)) { $liveComplete = $true }
+        if ($catalogEnabled -and ($catalogRowCount -lt $catalogTake -or $catalogItemsSeen -ge $effectiveMaxProducts)) { $catalogComplete = $true }
+        if ($liveEnabled -and ($liveRowCount -lt $liveTake -or $liveItemsSeen -ge $effectiveMaxProducts)) { $liveComplete = $true }
         $batchesCompleted = $batchNumber
 
         $progressState = [pscustomobject][ordered]@{

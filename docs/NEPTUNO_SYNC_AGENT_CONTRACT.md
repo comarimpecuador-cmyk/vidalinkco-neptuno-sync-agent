@@ -72,6 +72,8 @@ rama, conteos, lotes, timestamps y estado `running`, `interrupted`, `failed` o
 Un run incompleto o fallido no confirma fingerprints/cursors permanentes y no
 reemplaza `latest/sync-summary.json`; `latest` representa solamente un run
 completado. La retención nunca elimina runs `running` o `interrupted`.
+El SQL operativo compara el ID numérico nativo y no depende de `TRY_CONVERT` ni
+`TRY_CAST`, para mantener compatibilidad con el SQL Server de farmacia.
 
 El endpoint delta no se hardcodea: debe proporcionarse por `-ApiUrl` o
 `VIDALINKCO_NEPTUNO_SYNC_URL`, debe usar HTTPS y debe responder con el envelope
