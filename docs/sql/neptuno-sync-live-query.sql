@@ -1,6 +1,7 @@
 /*
-  NEPTUNO Phase 9A-1 live price/stock query.
-  Runtime parameters: @BodegaId (bigint), @MaxProducts (int).
+  NEPTUNO Phase 9A-1B live price/stock query.
+  Runtime parameters: @BodegaId (bigint), @MaxProducts (int) and optional
+  parameterized @ExternalIdN values injected at the marked filter placeholder.
   Read-only operational data only.
 */
 
@@ -27,4 +28,5 @@ LEFT JOIN in_estado_item AS ei
     ON ei.id_estado_item = i.id_estado_item
 WHERE i.id_item IS NOT NULL
   AND i.precio IS NOT NULL
+/*__EXTERNAL_IDS_FILTER__*/
 ORDER BY i.id_item;

@@ -1,4 +1,4 @@
-# NEPTUNO Sync Agent Phase 9A-1 Runbook
+# NEPTUNO Sync Agent Phase 9A-1B Permanent Runbook
 
 ## Objetivo y alcance
 
@@ -41,17 +41,42 @@ una auditoría de esquema en la PC farmacia; no se debe adivinar el join.
 -BodegaId          default 1
 -Mode              Catalog, Live o All; default All
 -MaxProducts       límite opcional para pruebas controladas
+-ExternalIds       IDs NEPTUNO opcionales para prueba dirigida
+-Eligibility       AllForAudit, ActiveSellable o ActiveSellableWithStock
+-OnInvalidLive     Quarantine (default) o FailFast
+-RunType           Bootstrap, Incremental (default) o Audit
+-RetentionRuns     runs conservados; default 20
 -Send              habilita explícitamente el POST
 -DryRun            explícito; sin -Send el dry-run es siempre true
 -ApiUrl             parámetro o VIDALINKCO_NEPTUNO_SYNC_URL
 -ApiToken           parámetro o VIDALINKCO_NEPTUNO_SYNC_TOKEN
--RebuildState      ignora fingerprints anteriores
+-RebuildState      reconstruye baseline en Bootstrap/Audit, no en Incremental
 ```
 
 El script rechaza `-Send -DryRun`. `-Send` exige URL HTTPS y token. Nunca
-imprime el token ni la connection string.
+imprime el token ni la connection string. `Audit` rechaza siempre `-Send`.
+`Incremental` exige un `state/fingerprints.json` compatible: si no existe, se
+debe ejecutar primero `Bootstrap`.
 
-## Dry-run en la PC farmacia
+## Tipos de ejecución permanentes
+
+- `Bootstrap`: ejecución inicial o reconstrucción deliberada del baseline.
+  Marca el universo leído como changed, crea fingerprints/cursors y no es la
+  operación diaria.
+- `Incremental`: modo permanente y default. Compara contra el estado local y
+  escribe en los payloads solamente catálogo/live que cambió.
+- `Audit`: diagnóstico amplio. Puede usar `AllForAudit`, genera evidencia y
+  quarantine, nunca envía ni modifica el state permanente.
+
+`MaxProducts` es solamente un recorte técnico. No es elegibilidad comercial.
+`Eligibility` filtra oferta live; no elimina metadata del catálogo. En
+particular, `ActiveSellableWithStock` exige stock normalizado positivo en live,
+pero no define qué productos existen en el catálogo maestro.
+
+`Mode Catalog` y `Mode Live` pueden calendarizarse por separado. Cada ejecución
+actualiza solamente su rama de fingerprints/cursors y conserva intacta la otra.
+
+## Bootstrap inicial en la PC farmacia
 
 Desde la raíz del repositorio:
 
@@ -61,19 +86,34 @@ Desde la raíz del repositorio:
   -SourceKey "neptuno-farmacia-universal" `
   -BodegaId 1 `
   -Mode All `
+  -Eligibility ActiveSellable `
+  -RunType Bootstrap `
   -DryRun
 ```
 
-Prueba acotada:
+No repita Bootstrap como operación normal. Después use Incremental:
 
 ```powershell
 .\scripts\sync-neptuno-catalog.ps1 `
-  -OutputDirectory ".\exports\neptuno-sync-test" `
+  -OutputDirectory ".\exports\neptuno-sync" `
   -BodegaId 1 `
   -Mode All `
-  -MaxProducts 10 `
-  -DryRun `
-  -RebuildState
+  -Eligibility ActiveSellableWithStock `
+  -RunType Incremental `
+  -DryRun
+```
+
+Prueba dirigida del producto `9102`, sin podar fingerprints de otros IDs:
+
+```powershell
+.\scripts\sync-neptuno-catalog.ps1 `
+  -OutputDirectory ".\exports\neptuno-sync" `
+  -ExternalIds 9102 `
+  -BodegaId 1 `
+  -Mode All `
+  -Eligibility AllForAudit `
+  -RunType Audit `
+  -DryRun
 ```
 
 La connection string por defecto es:
@@ -86,22 +126,40 @@ Aunque se reciba otra connection string, el script fuerza
 `ApplicationIntent=ReadOnly`. Los dos SQL se validan contra comandos mutantes
 antes de abrir la conexión.
 
-## Salidas locales
+## Estado, cursors y evidencia retenida
 
-Dentro de `OutputDirectory`:
+No se crean payloads sueltos en la raíz. La estructura es:
 
-- `catalog-payload.json`: snapshot completo de catálogo para el modo habilitado.
-- `live-payload.json`: snapshot completo de precio/stock para el modo habilitado.
-- `changed-products.json`: contrato delta que contiene solamente items cuyo
-  fingerprint es nuevo o cambió.
-- `sync-summary.json`: conteos y estado de dry-run/envío, sin secretos.
-- `sync-events.ndjson`: un evento sanitizado por ejecución.
-- `state/fingerprints.json`: hashes por producto y por producto/bodega.
+```text
+exports/neptuno-sync/
+  state/
+    fingerprints.json
+    cursors.json
+  runs/<syncRunId>/
+    catalog-payload.json
+    live-payload.json
+    changed-products.json
+    quarantine-items.json
+    sync-summary.json
+    sync-events.ndjson
+    sync-warnings.ndjson
+  latest/
+    sync-summary.json
+```
+
+`RetentionRuns` conserva los runs más recientes y borra solamente directorios
+viejos bajo `runs/`. Nunca borra `state/`. Quarantine es evidencia de calidad,
+no basura; queda sujeto a la misma retención auditable del run.
 
 Los fingerprints excluyen timestamps volátiles, normalizan strings con `Trim`,
 mantienen `null` estable y ordenan propiedades antes de SHA-256. Con
 `-MaxProducts` el estado no observado se conserva para evitar falsos cambios en
 la próxima ejecución completa.
+
+El catálogo usa fingerprint de datos maestros y excluye `precioOrigen`; cambios
+de precio pertenecen al fingerprint live. En `Incremental`, `catalog-payload`
+y `live-payload` contienen únicamente sus respectivos deltas. Bootstrap y Audit
+pueden emitir snapshots completos.
 
 El estado separa fingerprints observados (`catalog` / `live`) de fingerprints
 confirmados por envío (`sentCatalog` / `sentLive`). Dry-run actualiza solamente
@@ -110,23 +168,40 @@ de Vidalinkco. Con `-Send`, ambos grupos se actualizan solo después de una
 respuesta aceptada; un envío fallido conserva el estado anterior para permitir
 reintento.
 
+`state/cursors.json` registra `lastCatalogSyncAt`, `lastLiveSyncAt`,
+`lastSuccessfulSendAt`, high-watermarks, estrategia y confianza de esquema. El
+repo no confirma una columna global confiable como `aud_mod_fecha_hora` o
+`fecha_modificacion` en las tablas principales. Las fechas de última venta,
+compra, transacción o ajuste son eventos operativos parciales, no un cursor
+completo. Por eso la estrategia actual es
+`eligible-scan-fingerprint-fallback`: lectura elegible y salida solo de hashes
+cambiados. Los high-watermarks permanecen `null` hasta una auditoría fiable.
+
 ## Contrato de envío opt-in
 
 El POST usa el contenido de `changed-products.json`:
 
 ```json
 {
+  "contractVersion": 2,
   "source": "neptuno",
   "sourceKey": "neptuno-farmacia-universal",
   "syncRunId": "neptuno-...",
+  "idempotencyKey": "neptuno-...",
+  "runType": "Incremental",
   "mode": "All",
   "capturedAt": "2026-06-28T00:00:00Z",
-  "catalogItems": [],
-  "liveItems": []
+  "catalogChangedItems": [],
+  "liveChangedItems": [],
+  "quarantinedItems": {
+    "total": 0,
+    "negativePrice": 0,
+    "negativeStockWarnings": 0
+  }
 }
 ```
 
-Esta es una extensión aditiva de Fase 9A-1; no reemplaza los endpoints CSV
+Esta es una extensión aditiva de Fase 9A-1B; no reemplaza los endpoints CSV
 documentados previamente. La URL configurada debe apuntar a un endpoint que
 acepte explícitamente este contrato delta y responda con envelope:
 
@@ -134,10 +209,11 @@ acepte explícitamente este contrato delta y responda con envelope:
 { "ok": true, "data": {} }
 ```
 
-No se debe usar `-Send` hasta confirmar ese contrato en Vidalinkco. El script no
-asume ni concatena rutas de endpoint.
+No se debe usar `-Send` todavía ni hasta confirmar ese contrato en Vidalinkco.
+El script no asume ni concatena rutas de endpoint. Vidalinkco recibirá staging y
+deltas, no el universo completo de NEPTUNO en cada ejecución.
 
-Configurar secretos solo en la sesión local de PowerShell:
+Contrato futuro, no ejecutar todavía:
 
 ```powershell
 $env:VIDALINKCO_NEPTUNO_SYNC_URL = "https://host-autorizado.example/api/ruta-configurada"
@@ -147,6 +223,7 @@ $env:VIDALINKCO_NEPTUNO_SYNC_TOKEN = "valor-local-no-versionado"
   -OutputDirectory ".\exports\neptuno-sync" `
   -BodegaId 1 `
   -Mode All `
+  -RunType Incremental `
   -Send
 ```
 
@@ -173,6 +250,17 @@ Estado vivo:
 - estado, permiso de venta e IVA de origen.
 - timestamp de captura y raw operativo mínimo de IVA/bodega habilitada.
 
+Precio negativo bloquea el live item con `NEGATIVE_PRICE` y lo deja en
+`quarantine-items.json`; el catálogo puede conservar su metadata. Stock negativo
+no detiene el run: `stockUnidad`/`stockFraccion` se limitan a cero y los valores
+fuente quedan en `rawOperativo` con `NEGATIVE_STOCK_CLAMPED`. El warning aparece
+en quarantine, `sync-events.ndjson` y `sync-warnings.ndjson`.
+
+`ActiveSellable` excluye señales explícitas `puedeVender=false` o bodega
+deshabilitada, pero permite stock cero. `ActiveSellableWithStock` añade stock
+normalizado positivo. `AllForAudit` no aplica elegibilidad operativa, aunque
+precio negativo sigue bloqueado del payload live.
+
 ## Datos excluidos
 
 - blobs, bytes y archivos binarios.
@@ -191,10 +279,10 @@ contrato documentado por el proveedor, seguido de revisión humana.
 .\scripts\smoke-neptuno-sync-payload.ps1
 ```
 
-El smoke usa fixture sintético, no abre SQL y no envía red. Ejecuta tres ciclos:
-estado nuevo, estado sin cambios y cambio controlado. Valida parser, SQL
-read-only, estructura, fingerprints, changed-products, metadata plana de
-secciones, ausencia de secretos/blobs y aislamiento de red en dry-run.
+El smoke usa fixture sintético, no abre SQL y no envía red. El envío exitoso se
+simula con un switch interno no operativo. Valida Bootstrap, Incremental, Audit,
+confirmación de state, separación catálogo/live, negativos, ExternalIds,
+elegibilidad, FailFast, retención, Git ignore y seguridad de payload.
 
 Salida esperada:
 
@@ -202,9 +290,16 @@ Salida esperada:
 NEPTUNO sync payload smoke passed.
 PowerShell parser: OK
 SELECT-only SQL: OK
-Deterministic fingerprints: OK
+Bootstrap and incremental fingerprints: OK
 Dry-run preserves pending send delta: OK
-Changed-products detection: OK
+Successful send confirms state: OK
+Catalog/live delta separation: OK
+Negative live quarantine and stock clamp: OK
+ExternalIds and eligibility filters: OK
+Audit no-send behavior: OK
+FailFast policy: OK
+Run retention and permanent state: OK
+Git ignore for exports: OK
 Payload safety: OK
 Dry-run network isolation: OK
 Send credential guards: OK
@@ -212,7 +307,8 @@ Send credential guards: OK
 
 ## Riesgos y próximos pasos
 
-- Ejecutar primero `-MaxProducts 10 -DryRun` en la PC farmacia.
+- Ejecutar Bootstrap una vez y revisar su run antes de usar Incremental.
+- Usar `-MaxProducts` solo en una salida de prueba o Audit; no como filtro de negocio.
 - Revisar payloads y nombres de campos contra resultados reales.
 - Resolver el TODO de `pa_item_catalogo` mediante auditoría de esquema.
 - Confirmar el endpoint delta y su Zod/DTO antes de habilitar `-Send`.

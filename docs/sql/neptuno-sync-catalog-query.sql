@@ -1,6 +1,7 @@
 /*
-  NEPTUNO Phase 9A-1 catalog query.
-  Runtime parameters: @MaxProducts (int).
+  NEPTUNO Phase 9A-1B catalog query.
+  Runtime parameters: @MaxProducts (int) and optional parameterized
+  @ExternalIdN values injected at the marked filter placeholder.
   Read-only metadata only. Vademecum binary columns are intentionally absent.
 
   TODO pharmacy audit:
@@ -74,4 +75,5 @@ LEFT JOIN vademecum_sections AS vs
 WHERE i.id_item IS NOT NULL
   AND i.descripcion IS NOT NULL
   AND i.precio IS NOT NULL
+/*__EXTERNAL_IDS_FILTER__*/
 ORDER BY i.id_item;

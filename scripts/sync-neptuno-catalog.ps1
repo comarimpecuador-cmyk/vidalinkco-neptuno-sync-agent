@@ -25,6 +25,25 @@ param(
     [Nullable[int]]$MaxProducts,
 
     [Parameter()]
+    [string[]]$ExternalIds,
+
+    [Parameter()]
+    [ValidateSet("AllForAudit", "ActiveSellable", "ActiveSellableWithStock")]
+    [string]$Eligibility = "ActiveSellable",
+
+    [Parameter()]
+    [ValidateSet("Quarantine", "FailFast")]
+    [string]$OnInvalidLive = "Quarantine",
+
+    [Parameter()]
+    [ValidateSet("Bootstrap", "Incremental", "Audit")]
+    [string]$RunType = "Incremental",
+
+    [Parameter()]
+    [ValidateRange(1, 1000)]
+    [int]$RetentionRuns = 20,
+
+    [Parameter()]
     [switch]$Send,
 
     [Parameter()]
@@ -40,7 +59,10 @@ param(
     [switch]$RebuildState,
 
     [Parameter(DontShow)]
-    [string]$FixturePath
+    [string]$FixturePath,
+
+    [Parameter(DontShow)]
+    [switch]$MockSendSuccess
 )
 
 $ErrorActionPreference = "Stop"
@@ -134,6 +156,61 @@ function ConvertTo-NullableBool {
     }
 }
 
+function Get-NormalizedExternalIds {
+    param([Parameter()][string[]]$Values)
+
+    $ids = [System.Collections.Generic.List[string]]::new()
+    foreach ($value in @($Values)) {
+        foreach ($candidate in @(([string]$value) -split ',')) {
+            $id = $candidate.Trim()
+            if ($id.Length -eq 0) {
+                continue
+            }
+            if ($id -notmatch '^\d+$') {
+                throw "ExternalIds accepts numeric NEPTUNO IDs only."
+            }
+            if (-not $ids.Contains($id)) {
+                $ids.Add($id)
+            }
+        }
+    }
+    if ($ids.Count -gt 1000) {
+        throw "ExternalIds accepts at most 1000 IDs per run."
+    }
+    return $ids.ToArray()
+}
+
+function Add-ExternalIdsSqlFilter {
+    param(
+        [Parameter(Mandatory)][string]$Sql,
+        [Parameter(Mandatory)][hashtable]$Parameters,
+        [Parameter(Mandatory)][string[]]$Ids
+    )
+
+    $placeholder = '/*__EXTERNAL_IDS_FILTER__*/'
+    if (-not $Sql.Contains($placeholder)) {
+        throw "SQL query is missing the external IDs filter placeholder."
+    }
+    if ($Ids.Count -eq 0) {
+        return [pscustomobject]@{
+            Sql = $Sql.Replace($placeholder, '')
+            Parameters = $Parameters
+        }
+    }
+
+    $parameterNames = [System.Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $Ids.Count; $index++) {
+        $name = "ExternalId$index"
+        $Parameters[$name] = $Ids[$index]
+        $parameterNames.Add("@$name")
+    }
+    $filter = "AND CAST(i.id_item AS varchar(50)) IN (" + ($parameterNames -join ', ') + ")"
+    return [pscustomobject]@{
+        Sql = $Sql.Replace($placeholder, $filter)
+        Parameters = $Parameters
+    }
+}
+
 function Get-VademecumSectionNames {
     param([Parameter()]$Value)
 
@@ -166,10 +243,6 @@ function New-CatalogItem {
         throw "Product '$externalId' has no nombreOriginal."
     }
     $price = ConvertTo-RequiredDecimal -Value (Get-RowValue -Row $Row -Name "precioOrigen") -FieldName "precioOrigen" -ExternalId $externalId
-    if ($price -lt 0) {
-        throw "Product '$externalId' has a negative precioOrigen."
-    }
-
     return [pscustomobject][ordered]@{
         externalId = $externalId
         sourceKey = $ItemSourceKey.Trim()
@@ -205,11 +278,12 @@ function New-CatalogItem {
     }
 }
 
-function New-LiveItem {
+function Get-LiveItemEvaluation {
     param(
         [Parameter(Mandatory)]$Row,
         [Parameter(Mandatory)][string]$ItemSourceKey,
-        [Parameter(Mandatory)][string]$CapturedAt
+        [Parameter(Mandatory)][string]$CapturedAt,
+        [Parameter(Mandatory)][string]$EligibilityPolicy
     )
 
     $externalId = ConvertTo-NullableString -Value (Get-RowValue -Row $Row -Name "externalId")
@@ -221,13 +295,16 @@ function New-LiveItem {
         throw "Product '$externalId' has no bodegaExternalId."
     }
     $price = ConvertTo-RequiredDecimal -Value (Get-RowValue -Row $Row -Name "precioActual") -FieldName "precioActual" -ExternalId $externalId
-    $stockUnit = ConvertTo-RequiredDecimal -Value (Get-RowValue -Row $Row -Name "stockUnidad") -FieldName "stockUnidad" -ExternalId $externalId
-    $stockFraction = ConvertTo-RequiredDecimal -Value (Get-RowValue -Row $Row -Name "stockFraccion") -FieldName "stockFraccion" -ExternalId $externalId
-    if ($price -lt 0 -or $stockUnit -lt 0 -or $stockFraction -lt 0) {
-        throw "Product '$externalId' has negative live price or stock."
-    }
+    $sourceStockUnit = ConvertTo-RequiredDecimal -Value (Get-RowValue -Row $Row -Name "stockUnidad") -FieldName "stockUnidad" -ExternalId $externalId
+    $sourceStockFraction = ConvertTo-RequiredDecimal -Value (Get-RowValue -Row $Row -Name "stockFraccion") -FieldName "stockFraccion" -ExternalId $externalId
+    $hasNegativeStock = $sourceStockUnit -lt 0 -or $sourceStockFraction -lt 0
+    $stockUnit = [Math]::Max(0D, $sourceStockUnit)
+    $stockFraction = [Math]::Max(0D, $sourceStockFraction)
+    $canSell = ConvertTo-NullableBool -Value (Get-RowValue -Row $Row -Name "puedeVender")
+    $warehouseEnabledSource = ConvertTo-NullableString -Value (Get-RowValue -Row $Row -Name "bodegaHabilitado")
+    $warehouseEnabled = ConvertTo-NullableBool -Value $warehouseEnabledSource
 
-    return [pscustomobject][ordered]@{
+    $item = [pscustomobject][ordered]@{
         externalId = $externalId
         sourceKey = $ItemSourceKey.Trim()
         bodegaExternalId = $warehouseId
@@ -237,13 +314,34 @@ function New-LiveItem {
         stockFraccion = $stockFraction
         estadoExternalId = ConvertTo-NullableString -Value (Get-RowValue -Row $Row -Name "estadoExternalId")
         estadoNombre = ConvertTo-NullableString -Value (Get-RowValue -Row $Row -Name "estadoNombre")
-        puedeVender = ConvertTo-NullableBool -Value (Get-RowValue -Row $Row -Name "puedeVender")
+        puedeVender = $canSell
         aplicaIvaOrigen = ConvertTo-NullableString -Value (Get-RowValue -Row $Row -Name "aplicaIvaOrigen")
         capturedAt = $CapturedAt
         rawOperativo = [pscustomobject][ordered]@{
             ivaOrigenId = ConvertTo-NullableString -Value (Get-RowValue -Row $Row -Name "ivaOrigenId")
-            bodegaHabilitado = ConvertTo-NullableString -Value (Get-RowValue -Row $Row -Name "bodegaHabilitado")
+            bodegaHabilitado = $warehouseEnabledSource
+            sourceStockUnidad = $(if ($hasNegativeStock) { $sourceStockUnit } else { $null })
+            sourceStockFraccion = $(if ($hasNegativeStock) { $sourceStockFraction } else { $null })
+            stockNormalizedReason = $(if ($hasNegativeStock) { "NEGATIVE_STOCK_CLAMPED" } else { $null })
         }
+    }
+
+    $eligible = $true
+    if ($EligibilityPolicy -ne "AllForAudit") {
+        $eligible = $canSell -ne $false -and $warehouseEnabled -ne $false
+        if ($eligible -and $EligibilityPolicy -eq "ActiveSellableWithStock") {
+            $eligible = $stockUnit -gt 0 -or $stockFraction -gt 0
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        item = $item
+        eligible = $eligible
+        negativePrice = $price -lt 0
+        negativeStock = $hasNegativeStock
+        sourcePrice = $price
+        sourceStockUnidad = $sourceStockUnit
+        sourceStockFraccion = $sourceStockFraction
     }
 }
 
@@ -303,6 +401,18 @@ function Get-LiveFingerprintProjection {
     $projection = [ordered]@{}
     foreach ($property in $Item.PSObject.Properties) {
         if ($property.Name -ne "capturedAt") {
+            $projection[$property.Name] = $property.Value
+        }
+    }
+    return [pscustomobject]$projection
+}
+
+function Get-CatalogFingerprintProjection {
+    param([Parameter(Mandatory)]$Item)
+
+    $projection = [ordered]@{}
+    foreach ($property in $Item.PSObject.Properties) {
+        if ($property.Name -ne "precioOrigen") {
             $projection[$property.Name] = $property.Value
         }
     }
@@ -484,11 +594,68 @@ function Write-JsonFile {
     Write-Utf8NoBomLf -Path $Path -Content (($Value | ConvertTo-Json -Depth 30) + "`n")
 }
 
+function Add-NdjsonEvents {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter()][object[]]$Events = @()
+    )
+
+    if ($Events.Count -eq 0) {
+        if (-not [System.IO.File]::Exists($Path)) {
+            [System.IO.File]::WriteAllText($Path, "", [System.Text.UTF8Encoding]::new($false))
+        }
+        return
+    }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($event in $Events) {
+        Assert-SafePayload -Value $event -Path '$.event'
+        $lines.Add(($event | ConvertTo-Json -Compress -Depth 10))
+    }
+    [System.IO.File]::AppendAllText($Path, (($lines.ToArray() -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+}
+
+function Invoke-RunRetention {
+    param(
+        [Parameter(Mandatory)][string]$RunsDirectory,
+        [Parameter(Mandatory)][int]$Keep
+    )
+
+    if (-not [System.IO.Directory]::Exists($RunsDirectory)) {
+        return
+    }
+    $runs = @(
+        Get-ChildItem -LiteralPath $RunsDirectory -Directory -Force |
+            Sort-Object Name -Descending
+    )
+    $resolvedRunsDirectory = [System.IO.Path]::GetFullPath($RunsDirectory).TrimEnd('\', '/')
+    $runsPrefix = $resolvedRunsDirectory + [System.IO.Path]::DirectorySeparatorChar
+    foreach ($run in @($runs | Select-Object -Skip $Keep)) {
+        $resolvedRun = [System.IO.Path]::GetFullPath($run.FullName)
+        if (-not $resolvedRun.StartsWith($runsPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals((Split-Path -Parent $resolvedRun), $resolvedRunsDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Retention refused a path outside the direct runs directory."
+        }
+        if (($run.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Retention refused a reparse-point run directory."
+        }
+        Remove-Item -LiteralPath $resolvedRun -Recurse -Force
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($SourceKey)) {
     throw "SourceKey is required."
 }
 if ($Send -and $DryRun) {
     throw "Use either -Send or -DryRun, not both."
+}
+if ($RunType -eq "Audit" -and $Send) {
+    throw "RunType Audit never sends data."
+}
+if ($RunType -eq "Incremental" -and $RebuildState) {
+    throw "RebuildState is not valid for Incremental. Use RunType Bootstrap to rebuild the baseline."
+}
+if ($MockSendSuccess -and -not $Send) {
+    throw "MockSendSuccess is a smoke-only option and requires -Send."
 }
 $effectiveDryRun = -not $Send
 $effectiveApiUrl = if ([string]::IsNullOrWhiteSpace($ApiUrl)) { $env:VIDALINKCO_NEPTUNO_SYNC_URL } else { $ApiUrl }
@@ -509,9 +676,24 @@ if ($Send) {
 $resolvedOutputDirectory = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($OutputDirectory))
 $stateDirectory = Join-Path $resolvedOutputDirectory "state"
 $statePath = Join-Path $stateDirectory "fingerprints.json"
+$cursorPath = Join-Path $stateDirectory "cursors.json"
+$runsDirectory = Join-Path $resolvedOutputDirectory "runs"
+$latestDirectory = Join-Path $resolvedOutputDirectory "latest"
 $capturedAt = [DateTimeOffset]::UtcNow.ToString("o")
 $syncRunId = "neptuno-" + [DateTimeOffset]::UtcNow.ToString("yyyyMMddTHHmmssfffZ") + "-" + ([Guid]::NewGuid().ToString("N").Substring(0, 8))
+$runDirectory = Join-Path $runsDirectory $syncRunId
+if ($RunType -eq "Incremental") {
+    if (-not [System.IO.File]::Exists($statePath)) {
+        throw "RunType Incremental requires fingerprint state. Run Bootstrap first for this OutputDirectory."
+    }
+    $preflightState = Get-Content -Raw -LiteralPath $statePath -Encoding UTF8 | ConvertFrom-Json
+    if (-not [string]::Equals([string]$preflightState.sourceKey, $SourceKey.Trim(), [System.StringComparison]::Ordinal)) {
+        throw "RunType Incremental found fingerprint state for a different SourceKey. Use the matching OutputDirectory or run Bootstrap deliberately."
+    }
+}
 $effectiveMaxProducts = if ($null -eq $MaxProducts) { [int]::MaxValue } else { [int]$MaxProducts }
+$normalizedExternalIds = @(Get-NormalizedExternalIds -Values $ExternalIds)
+$externalIdsFilterApplied = $normalizedExternalIds.Count -gt 0
 $catalogEnabled = $Mode -in @("Catalog", "All")
 $liveEnabled = $Mode -in @("Live", "All")
 
@@ -523,8 +705,17 @@ if (-not [string]::IsNullOrWhiteSpace($FixturePath)) {
         throw "FixturePath does not exist."
     }
     $fixture = Get-Content -Raw -LiteralPath $resolvedFixturePath -Encoding UTF8 | ConvertFrom-Json
-    if ($catalogEnabled) { $catalogRows = @($fixture.catalogRows | Select-Object -First $effectiveMaxProducts) }
-    if ($liveEnabled) { $liveRows = @($fixture.liveRows | Where-Object { [long]$_.bodegaExternalId -eq $BodegaId } | Select-Object -First $effectiveMaxProducts) }
+    if ($catalogEnabled) {
+        $catalogRows = @($fixture.catalogRows | Where-Object {
+            -not $externalIdsFilterApplied -or $normalizedExternalIds -contains ([string]$_.externalId).Trim()
+        } | Select-Object -First $effectiveMaxProducts)
+    }
+    if ($liveEnabled) {
+        $liveRows = @($fixture.liveRows | Where-Object {
+            [long]$_.bodegaExternalId -eq $BodegaId -and
+            (-not $externalIdsFilterApplied -or $normalizedExternalIds -contains ([string]$_.externalId).Trim())
+        } | Select-Object -First $effectiveMaxProducts)
+    }
 }
 else {
     $catalogSqlPath = Join-Path $repoRoot "docs/sql/neptuno-sync-catalog-query.sql"
@@ -537,10 +728,14 @@ else {
     $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new($ConnectionString)
     $builder.ApplicationIntent = [System.Data.SqlClient.ApplicationIntent]::ReadOnly
     if ($catalogEnabled) {
-        $catalogRows = Invoke-NeptunoSelectRows -SafeConnectionString $builder.ConnectionString -Sql $catalogSql -Parameters @{ MaxProducts = $effectiveMaxProducts }
+        $catalogQuery = Add-ExternalIdsSqlFilter -Sql $catalogSql -Parameters @{ MaxProducts = $effectiveMaxProducts } -Ids $normalizedExternalIds
+        Assert-ReadOnlySql -Sql $catalogQuery.Sql -Name "neptuno-sync-catalog-query.sql (runtime)"
+        $catalogRows = Invoke-NeptunoSelectRows -SafeConnectionString $builder.ConnectionString -Sql $catalogQuery.Sql -Parameters $catalogQuery.Parameters
     }
     if ($liveEnabled) {
-        $liveRows = Invoke-NeptunoSelectRows -SafeConnectionString $builder.ConnectionString -Sql $liveSql -Parameters @{ BodegaId = $BodegaId; MaxProducts = $effectiveMaxProducts }
+        $liveQuery = Add-ExternalIdsSqlFilter -Sql $liveSql -Parameters @{ BodegaId = $BodegaId; MaxProducts = $effectiveMaxProducts } -Ids $normalizedExternalIds
+        Assert-ReadOnlySql -Sql $liveQuery.Sql -Name "neptuno-sync-live-query.sql (runtime)"
+        $liveRows = Invoke-NeptunoSelectRows -SafeConnectionString $builder.ConnectionString -Sql $liveQuery.Sql -Parameters $liveQuery.Parameters
     }
 }
 
@@ -549,8 +744,69 @@ foreach ($row in $catalogRows) {
     $catalogItems.Add((New-CatalogItem -Row $row -ItemSourceKey $SourceKey))
 }
 $liveItems = [System.Collections.Generic.List[object]]::new()
+$quarantineItems = [System.Collections.Generic.List[object]]::new()
+$warningEvents = [System.Collections.Generic.List[object]]::new()
+$qualityEvents = [System.Collections.Generic.List[object]]::new()
+$quarantinedKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$negativePriceKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$negativeStockKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$failFastViolation = $false
 foreach ($row in $liveRows) {
-    $liveItems.Add((New-LiveItem -Row $row -ItemSourceKey $SourceKey -CapturedAt $capturedAt))
+    $evaluation = Get-LiveItemEvaluation -Row $row -ItemSourceKey $SourceKey -CapturedAt $capturedAt -EligibilityPolicy $Eligibility
+    $itemKey = "$($evaluation.item.externalId)|$($evaluation.item.bodegaExternalId)"
+    if ($evaluation.negativeStock) {
+        [void]$quarantinedKeys.Add($itemKey)
+        [void]$negativeStockKeys.Add($itemKey)
+        $stockWarning = [pscustomobject][ordered]@{
+            externalId = $evaluation.item.externalId
+            bodegaExternalId = $evaluation.item.bodegaExternalId
+            severity = "warning"
+            blocking = $false
+            reason = "NEGATIVE_STOCK_CLAMPED"
+            sourceStockUnidad = $evaluation.sourceStockUnidad
+            sourceStockFraccion = $evaluation.sourceStockFraccion
+            normalizedStockUnidad = $evaluation.item.stockUnidad
+            normalizedStockFraccion = $evaluation.item.stockFraccion
+        }
+        $quarantineItems.Add($stockWarning)
+        $warningEvent = [pscustomobject][ordered]@{
+            eventType = "live-stock-normalized"
+            syncRunId = $syncRunId
+            occurredAt = $capturedAt
+            externalId = $evaluation.item.externalId
+            bodegaExternalId = $evaluation.item.bodegaExternalId
+            reason = "NEGATIVE_STOCK_CLAMPED"
+        }
+        $warningEvents.Add($warningEvent)
+        $qualityEvents.Add($warningEvent)
+    }
+    if ($evaluation.negativePrice) {
+        [void]$quarantinedKeys.Add($itemKey)
+        [void]$negativePriceKeys.Add($itemKey)
+        $quarantineItems.Add([pscustomobject][ordered]@{
+            externalId = $evaluation.item.externalId
+            bodegaExternalId = $evaluation.item.bodegaExternalId
+            severity = "error"
+            blocking = $true
+            reason = "NEGATIVE_PRICE"
+            sourcePrecioActual = $evaluation.sourcePrice
+        })
+        $qualityEvents.Add([pscustomobject][ordered]@{
+            eventType = "live-item-quarantined"
+            syncRunId = $syncRunId
+            occurredAt = $capturedAt
+            externalId = $evaluation.item.externalId
+            bodegaExternalId = $evaluation.item.bodegaExternalId
+            reason = "NEGATIVE_PRICE"
+        })
+        if ($OnInvalidLive -eq "FailFast") {
+            $failFastViolation = $true
+        }
+        continue
+    }
+    if ($evaluation.eligible) {
+        $liveItems.Add($evaluation.item)
+    }
 }
 $sortedCatalogItems = @($catalogItems.ToArray() | Sort-Object externalId)
 $sortedLiveItems = @($liveItems.ToArray() | Sort-Object externalId, bodegaExternalId)
@@ -559,9 +815,11 @@ $previousCatalog = @{}
 $previousLive = @{}
 $previousSentCatalog = @{}
 $previousSentLive = @{}
+$hasCompatibleState = $false
 if (-not $RebuildState -and [System.IO.File]::Exists($statePath)) {
     $previousState = Get-Content -Raw -LiteralPath $statePath -Encoding UTF8 | ConvertFrom-Json
     if ([string]::Equals([string]$previousState.sourceKey, $SourceKey.Trim(), [System.StringComparison]::Ordinal)) {
+        $hasCompatibleState = $true
         $previousCatalog = ConvertTo-FingerprintMap -Value $previousState.catalog
         $previousLive = ConvertTo-FingerprintMap -Value $previousState.live
         $sentCatalogProperty = $previousState.PSObject.Properties["sentCatalog"]
@@ -574,12 +832,31 @@ if (-not $RebuildState -and [System.IO.File]::Exists($statePath)) {
         }
     }
 }
+if ($RunType -eq "Incremental" -and -not $hasCompatibleState) {
+    throw "RunType Incremental requires compatible fingerprint state. Run Bootstrap first for this OutputDirectory and SourceKey."
+}
 
-$limitedRun = $null -ne $MaxProducts
-$nextCatalog = if ($RebuildState -or ($catalogEnabled -and -not $limitedRun)) { @{} } else { Copy-Map -Map $previousCatalog }
-$nextLive = if ($RebuildState -or ($liveEnabled -and -not $limitedRun)) { @{} } else { Copy-Map -Map $previousLive }
-$nextSentCatalog = if ($RebuildState -or ($Send -and $catalogEnabled -and -not $limitedRun)) { @{} } else { Copy-Map -Map $previousSentCatalog }
-$nextSentLive = if ($RebuildState -or ($Send -and $liveEnabled -and -not $limitedRun)) { @{} } else { Copy-Map -Map $previousSentLive }
+$previousLastCatalogSyncAt = $null
+$previousLastLiveSyncAt = $null
+$previousLastSuccessfulSendAt = $null
+if ([System.IO.File]::Exists($cursorPath)) {
+    $previousCursors = Get-Content -Raw -LiteralPath $cursorPath -Encoding UTF8 | ConvertFrom-Json
+    if ([string]::Equals([string]$previousCursors.sourceKey, $SourceKey.Trim(), [System.StringComparison]::Ordinal)) {
+        foreach ($cursorName in @("lastCatalogSyncAt", "lastLiveSyncAt", "lastSuccessfulSendAt")) {
+            $property = $previousCursors.PSObject.Properties[$cursorName]
+            if ($null -ne $property) {
+                Set-Variable -Name ("previous" + $cursorName.Substring(0, 1).ToUpperInvariant() + $cursorName.Substring(1)) -Value $property.Value
+            }
+        }
+    }
+}
+
+$limitedRun = $null -ne $MaxProducts -or $externalIdsFilterApplied
+$baselineReset = $RebuildState -or $RunType -eq "Bootstrap"
+$nextCatalog = if ($catalogEnabled -and ($baselineReset -or -not $limitedRun)) { @{} } else { Copy-Map -Map $previousCatalog }
+$nextLive = if ($liveEnabled -and ($baselineReset -or -not $limitedRun)) { @{} } else { Copy-Map -Map $previousLive }
+$nextSentCatalog = if ($catalogEnabled -and ($baselineReset -or ($Send -and -not $limitedRun))) { @{} } else { Copy-Map -Map $previousSentCatalog }
+$nextSentLive = if ($liveEnabled -and ($baselineReset -or ($Send -and -not $limitedRun))) { @{} } else { Copy-Map -Map $previousSentLive }
 $catalogComparison = if ($Send) { $previousSentCatalog } else { $previousCatalog }
 $liveComparison = if ($Send) { $previousSentLive } else { $previousLive }
 $changedCatalog = [System.Collections.Generic.List[object]]::new()
@@ -587,8 +864,8 @@ $changedLive = [System.Collections.Generic.List[object]]::new()
 
 if ($catalogEnabled) {
     foreach ($item in $sortedCatalogItems) {
-        $hash = Get-StableFingerprint -Value $item
-        if (-not $catalogComparison.ContainsKey($item.externalId) -or $catalogComparison[$item.externalId] -ne $hash -or $RebuildState) {
+        $hash = Get-StableFingerprint -Value (Get-CatalogFingerprintProjection -Item $item)
+        if (-not $catalogComparison.ContainsKey($item.externalId) -or $catalogComparison[$item.externalId] -ne $hash -or $baselineReset) {
             $changedCatalog.Add($item)
         }
         $nextCatalog[$item.externalId] = $hash
@@ -601,7 +878,7 @@ if ($liveEnabled) {
     foreach ($item in $sortedLiveItems) {
         $key = "$($item.externalId)|$($item.bodegaExternalId)"
         $hash = Get-StableFingerprint -Value (Get-LiveFingerprintProjection -Item $item)
-        if (-not $liveComparison.ContainsKey($key) -or $liveComparison[$key] -ne $hash -or $RebuildState) {
+        if (-not $liveComparison.ContainsKey($key) -or $liveComparison[$key] -ne $hash -or $baselineReset) {
             $changedLive.Add($item)
         }
         $nextLive[$key] = $hash
@@ -611,30 +888,59 @@ if ($liveEnabled) {
     }
 }
 
+$emitFullPayloads = $RunType -in @("Bootstrap", "Audit")
+$catalogPayloadItems = @()
+$livePayloadItems = @()
+if ($emitFullPayloads) {
+    $catalogPayloadItems = @($sortedCatalogItems)
+    $livePayloadItems = @($sortedLiveItems)
+}
+else {
+    $catalogPayloadItems = @($changedCatalog.ToArray())
+    $livePayloadItems = @($changedLive.ToArray())
+}
 $catalogPayload = [pscustomobject][ordered]@{
     source = "neptuno"
     sourceKey = $SourceKey.Trim()
     agentId = $SourceKey.Trim()
     syncRunId = $syncRunId
+    runType = $RunType
     capturedAt = $capturedAt
-    items = $sortedCatalogItems
+    items = $catalogPayloadItems
 }
 $livePayload = [pscustomobject][ordered]@{
     source = "neptuno"
     sourceKey = $SourceKey.Trim()
     agentId = $SourceKey.Trim()
     syncRunId = $syncRunId
+    runType = $RunType
     capturedAt = $capturedAt
-    items = $sortedLiveItems
+    items = $livePayloadItems
 }
 $deltaPayload = [pscustomobject][ordered]@{
+    contractVersion = 2
     source = "neptuno"
     sourceKey = $SourceKey.Trim()
     syncRunId = $syncRunId
+    idempotencyKey = $syncRunId
+    runType = $RunType
     mode = $Mode
     capturedAt = $capturedAt
-    catalogItems = $changedCatalog.ToArray()
-    liveItems = $changedLive.ToArray()
+    catalogChangedItems = $changedCatalog.ToArray()
+    liveChangedItems = $changedLive.ToArray()
+    quarantinedItems = [pscustomobject][ordered]@{
+        total = $quarantinedKeys.Count
+        negativePrice = $negativePriceKeys.Count
+        negativeStockWarnings = $negativeStockKeys.Count
+    }
+}
+$quarantinePayload = [pscustomobject][ordered]@{
+    source = "neptuno"
+    sourceKey = $SourceKey.Trim()
+    syncRunId = $syncRunId
+    runType = $RunType
+    capturedAt = $capturedAt
+    items = @($quarantineItems.ToArray() | Sort-Object externalId, bodegaExternalId, reason)
 }
 $nextState = [pscustomobject][ordered]@{
     version = 2
@@ -649,33 +955,111 @@ $nextState = [pscustomobject][ordered]@{
 Assert-SafePayload -Value $catalogPayload -Path '$.catalog'
 Assert-SafePayload -Value $livePayload -Path '$.live'
 Assert-SafePayload -Value $deltaPayload -Path '$.changes'
+Assert-SafePayload -Value $quarantinePayload -Path '$.quarantine'
 Assert-SafePayload -Value $nextState -Path '$.state'
 
 [System.IO.Directory]::CreateDirectory($resolvedOutputDirectory) | Out-Null
 [System.IO.Directory]::CreateDirectory($stateDirectory) | Out-Null
-Write-JsonFile -Path (Join-Path $resolvedOutputDirectory "catalog-payload.json") -Value $catalogPayload
-Write-JsonFile -Path (Join-Path $resolvedOutputDirectory "live-payload.json") -Value $livePayload
-Write-JsonFile -Path (Join-Path $resolvedOutputDirectory "changed-products.json") -Value $deltaPayload
+[System.IO.Directory]::CreateDirectory($runsDirectory) | Out-Null
+[System.IO.Directory]::CreateDirectory($runDirectory) | Out-Null
+[System.IO.Directory]::CreateDirectory($latestDirectory) | Out-Null
+Write-JsonFile -Path (Join-Path $runDirectory "catalog-payload.json") -Value $catalogPayload
+Write-JsonFile -Path (Join-Path $runDirectory "live-payload.json") -Value $livePayload
+Write-JsonFile -Path (Join-Path $runDirectory "changed-products.json") -Value $deltaPayload
+Write-JsonFile -Path (Join-Path $runDirectory "quarantine-items.json") -Value $quarantinePayload
+Add-NdjsonEvents -Path (Join-Path $runDirectory "sync-events.ndjson") -Events $qualityEvents.ToArray()
+Add-NdjsonEvents -Path (Join-Path $runDirectory "sync-warnings.ndjson") -Events $warningEvents.ToArray()
+
+if ($failFastViolation) {
+    $failFastSummary = [pscustomobject][ordered]@{
+        sourceKey = $SourceKey.Trim()
+        syncRunId = $syncRunId
+        runType = $RunType
+        mode = $Mode
+        dryRun = $effectiveDryRun
+        sendRequested = [bool]$Send
+        sendAttempted = $false
+        sendStatus = "not-attempted"
+        catalogItems = $sortedCatalogItems.Count
+        liveItems = $sortedLiveItems.Count
+        changedCatalogItems = $changedCatalog.Count
+        changedLiveItems = $changedLive.Count
+        quarantinedItems = $quarantinedKeys.Count
+        warnings = $warningEvents.Count
+        negativePriceItems = $negativePriceKeys.Count
+        negativeStockItems = $negativeStockKeys.Count
+        eligibility = $Eligibility
+        externalIdsFilterApplied = $externalIdsFilterApplied
+        stateUpdated = $false
+        cursorsUpdated = $false
+        completedAt = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    Write-JsonFile -Path (Join-Path $runDirectory "sync-summary.json") -Value $failFastSummary
+    Write-JsonFile -Path (Join-Path $latestDirectory "sync-summary.json") -Value $failFastSummary
+    Add-NdjsonEvents -Path (Join-Path $runDirectory "sync-events.ndjson") -Events @(
+        [pscustomobject][ordered]@{
+            eventType = "sync-failed"
+            syncRunId = $syncRunId
+            occurredAt = $failFastSummary.completedAt
+            runType = $RunType
+            mode = $Mode
+            reason = "NEGATIVE_PRICE"
+            sendAttempted = $false
+        }
+    )
+    Invoke-RunRetention -RunsDirectory $runsDirectory -Keep $RetentionRuns
+    throw "Live data contains negative price item(s); OnInvalidLive=FailFast stopped the run."
+}
 
 $sendStatus = "dry-run"
 $sendAttempted = $false
+$stateUpdated = $false
+$cursorsUpdated = $false
 try {
     if ($Send -and ($changedCatalog.Count + $changedLive.Count) -gt 0) {
         $sendAttempted = $true
-        Invoke-DeltaSend -Uri $parsedApiUri -BearerToken $effectiveApiToken -IdempotencyKey $syncRunId -Payload $deltaPayload
+        if (-not $MockSendSuccess) {
+            Invoke-DeltaSend -Uri $parsedApiUri -BearerToken $effectiveApiToken -IdempotencyKey $syncRunId -Payload $deltaPayload
+        }
         $sendStatus = "sent"
     }
     elseif ($Send) {
         $sendStatus = "no-changes"
     }
 
-    Write-JsonFile -Path $statePath -Value $nextState
+    if ($RunType -ne "Audit") {
+        Write-JsonFile -Path $statePath -Value $nextState
+        $stateUpdated = $true
+        $cursorUpdatedAt = [DateTimeOffset]::UtcNow.ToString("o")
+        $nextCursors = [pscustomobject][ordered]@{
+            version = 1
+            sourceKey = $SourceKey.Trim()
+            lastCatalogSyncAt = $(if ($catalogEnabled) { $cursorUpdatedAt } else { $previousLastCatalogSyncAt })
+            lastLiveSyncAt = $(if ($liveEnabled) { $cursorUpdatedAt } else { $previousLastLiveSyncAt })
+            lastSuccessfulSendAt = $(if ($sendStatus -eq "sent") { $cursorUpdatedAt } else { $previousLastSuccessfulSendAt })
+            sourceHighWatermarks = [pscustomobject][ordered]@{
+                catalog = $null
+                live = $null
+            }
+            queryStrategy = [pscustomobject][ordered]@{
+                catalog = "eligible-scan-fingerprint-fallback"
+                live = "eligible-scan-fingerprint-fallback"
+            }
+            schemaConfidence = [pscustomobject][ordered]@{
+                catalog = "no-reliable-audit-column-confirmed"
+                live = "operational-event-dates-not-safe-as-global-cursor"
+            }
+        }
+        Write-JsonFile -Path $cursorPath -Value $nextCursors
+        $cursorsUpdated = $true
+    }
 }
 catch {
     $sendStatus = "failed"
     $failedSummary = [pscustomobject][ordered]@{
         sourceKey = $SourceKey.Trim()
         syncRunId = $syncRunId
+        runType = $RunType
         mode = $Mode
         dryRun = $effectiveDryRun
         sendRequested = [bool]$Send
@@ -685,24 +1069,35 @@ catch {
         liveItems = $sortedLiveItems.Count
         changedCatalogItems = $changedCatalog.Count
         changedLiveItems = $changedLive.Count
+        quarantinedItems = $quarantinedKeys.Count
+        warnings = $warningEvents.Count
+        negativePriceItems = $negativePriceKeys.Count
+        negativeStockItems = $negativeStockKeys.Count
+        eligibility = $Eligibility
+        externalIdsFilterApplied = $externalIdsFilterApplied
         stateUpdated = $false
+        cursorsUpdated = $false
         completedAt = [DateTimeOffset]::UtcNow.ToString("o")
     }
-    Write-JsonFile -Path (Join-Path $resolvedOutputDirectory "sync-summary.json") -Value $failedSummary
+    Write-JsonFile -Path (Join-Path $runDirectory "sync-summary.json") -Value $failedSummary
+    Write-JsonFile -Path (Join-Path $latestDirectory "sync-summary.json") -Value $failedSummary
     $failedEvent = [pscustomobject][ordered]@{
         eventType = "sync-failed"
         syncRunId = $syncRunId
         occurredAt = [DateTimeOffset]::UtcNow.ToString("o")
+        runType = $RunType
         mode = $Mode
         sendAttempted = $sendAttempted
     }
-    [System.IO.File]::AppendAllText((Join-Path $resolvedOutputDirectory "sync-events.ndjson"), (($failedEvent | ConvertTo-Json -Compress) + "`n"), [System.Text.UTF8Encoding]::new($false))
+    Add-NdjsonEvents -Path (Join-Path $runDirectory "sync-events.ndjson") -Events @($failedEvent)
+    Invoke-RunRetention -RunsDirectory $runsDirectory -Keep $RetentionRuns
     throw
 }
 
 $summary = [pscustomobject][ordered]@{
     sourceKey = $SourceKey.Trim()
     syncRunId = $syncRunId
+    runType = $RunType
     mode = $Mode
     dryRun = $effectiveDryRun
     sendRequested = [bool]$Send
@@ -712,14 +1107,23 @@ $summary = [pscustomobject][ordered]@{
     liveItems = $sortedLiveItems.Count
     changedCatalogItems = $changedCatalog.Count
     changedLiveItems = $changedLive.Count
-    stateUpdated = $true
+    quarantinedItems = $quarantinedKeys.Count
+    warnings = $warningEvents.Count
+    negativePriceItems = $negativePriceKeys.Count
+    negativeStockItems = $negativeStockKeys.Count
+    eligibility = $Eligibility
+    externalIdsFilterApplied = $externalIdsFilterApplied
+    stateUpdated = $stateUpdated
+    cursorsUpdated = $cursorsUpdated
     completedAt = [DateTimeOffset]::UtcNow.ToString("o")
 }
-Write-JsonFile -Path (Join-Path $resolvedOutputDirectory "sync-summary.json") -Value $summary
+Write-JsonFile -Path (Join-Path $runDirectory "sync-summary.json") -Value $summary
+Write-JsonFile -Path (Join-Path $latestDirectory "sync-summary.json") -Value $summary
 $event = [pscustomobject][ordered]@{
     eventType = "sync-completed"
     syncRunId = $syncRunId
     occurredAt = $summary.completedAt
+    runType = $RunType
     mode = $Mode
     dryRun = $effectiveDryRun
     sendStatus = $sendStatus
@@ -727,14 +1131,20 @@ $event = [pscustomobject][ordered]@{
     liveItems = $summary.liveItems
     changedCatalogItems = $summary.changedCatalogItems
     changedLiveItems = $summary.changedLiveItems
+    quarantinedItems = $summary.quarantinedItems
+    warnings = $summary.warnings
 }
-Assert-SafePayload -Value $event -Path '$.event'
-[System.IO.File]::AppendAllText((Join-Path $resolvedOutputDirectory "sync-events.ndjson"), (($event | ConvertTo-Json -Compress) + "`n"), [System.Text.UTF8Encoding]::new($false))
+Add-NdjsonEvents -Path (Join-Path $runDirectory "sync-events.ndjson") -Events @($event)
+Invoke-RunRetention -RunsDirectory $runsDirectory -Keep $RetentionRuns
 
-Write-Host "NEPTUNO Phase 9A-1 sync completed."
+Write-Host "NEPTUNO Phase 9A-1B sync completed."
+Write-Host "Run type: $RunType"
 Write-Host "Mode: $Mode"
 Write-Host "Dry-run: $effectiveDryRun"
 Write-Host "Catalog items: $($summary.catalogItems); changed: $($summary.changedCatalogItems)"
 Write-Host "Live items: $($summary.liveItems); changed: $($summary.changedLiveItems)"
+Write-Host "Quarantined items: $($summary.quarantinedItems); warnings: $($summary.warnings)"
+Write-Host "Eligibility: $Eligibility; external IDs filter: $externalIdsFilterApplied"
 Write-Host "Send status: $sendStatus"
-Write-Host "Output: $resolvedOutputDirectory"
+Write-Host "Run output: $runDirectory"
+Write-Host "Permanent state: $stateDirectory"

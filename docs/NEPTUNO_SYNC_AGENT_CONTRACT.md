@@ -9,32 +9,52 @@ envio manual de stock/precio desde CSV local y envio manual de catalogo desde
 CSV local. Ese runner no conecta todavia a SQL Server ni instala Windows
 Service.
 
-La Fase 9A-1 agrega, de forma separada y aditiva, el script PowerShell
+La Fase 9A-1B agrega, de forma separada y aditiva, el script PowerShell
 `scripts/sync-neptuno-catalog.ps1`. Este script consulta SQL Server con
 `ApplicationIntent=ReadOnly` y SQL `SELECT`-only, genera snapshots y delta
-incremental local, y permanece en dry-run salvo `-Send` explicito. No reemplaza
-los runners CSV ni sus endpoints.
+incremental local, y permanece en dry-run salvo `-Send` explicito. Su operación
+permanente es `Bootstrap` una sola vez, seguida por `Incremental`; `Audit` nunca
+envía ni altera el state. No reemplaza los runners CSV ni sus endpoints.
 
-## Contrato delta Fase 9A-1
+## Contrato delta Fase 9A-1B
 
 El artefacto `changed-products.json` y el body opcional de `-Send` usan:
 
 ```json
 {
+  "contractVersion": 2,
   "source": "neptuno",
   "sourceKey": "neptuno-farmacia-universal",
   "syncRunId": "neptuno-20260628T000000000Z-12345678",
+  "idempotencyKey": "neptuno-20260628T000000000Z-12345678",
+  "runType": "Incremental",
   "mode": "All",
   "capturedAt": "2026-06-28T00:00:00Z",
-  "catalogItems": [],
-  "liveItems": []
+  "catalogChangedItems": [],
+  "liveChangedItems": [],
+  "quarantinedItems": {
+    "total": 0,
+    "negativePrice": 0,
+    "negativeStockWarnings": 0
+  }
 }
 ```
 
-`catalogItems` contiene metadata factual de producto y nombres de secciones de
-vademecum. `liveItems` contiene precio/stock por bodega y captura operativa
-minima. Ninguno admite `fa_vademecum.cabecera`,
+`catalogChangedItems` contiene solamente cambios de datos maestros y metadata
+factual; su fingerprint excluye precio. `liveChangedItems` contiene solamente
+cambios de precio/stock/estado por bodega. Ninguno admite `fa_vademecum.cabecera`,
 `fa_seccion_vademecum.contenido`, bytes ni texto clinico decodificado.
+
+Precio negativo queda bloqueado del live delta con `NEGATIVE_PRICE`. Stock
+negativo se normaliza a cero y conserva sus valores fuente con
+`NEGATIVE_STOCK_CLAMPED`. Quarantine es evidencia retenida por run, no dato
+publicable.
+
+El estado permanente vive bajo `OutputDirectory/state`: `fingerprints.json`
+separa observado de enviado y `cursors.json` registra sync/send timestamps,
+high-watermarks, estrategia y confianza. No hay una columna global de auditoria
+confirmada en las tablas principales; la estrategia vigente es
+`eligible-scan-fingerprint-fallback` con high-watermarks nulos.
 
 El endpoint delta no se hardcodea: debe proporcionarse por `-ApiUrl` o
 `VIDALINKCO_NEPTUNO_SYNC_URL`, debe usar HTTPS y debe responder con el envelope
