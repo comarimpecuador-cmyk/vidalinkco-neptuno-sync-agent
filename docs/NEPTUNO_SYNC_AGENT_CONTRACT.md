@@ -4,7 +4,43 @@
 
 El agente Vidalinkco NEPTUNO Sync Agent corre en una PC Windows de farmacia para preparar la sincronizacion segura entre NEPTUNO SQL Server y Vidalinkco por HTTPS.
 
-En esta fase el agente implementa configuracion segura, heartbeat, dry-run, envio manual de stock/precio desde CSV local y envio manual de catalogo desde CSV local. No conecta todavia a SQL Server ni instala Windows Service.
+El runner .NET inicial implementa configuracion segura, heartbeat, dry-run,
+envio manual de stock/precio desde CSV local y envio manual de catalogo desde
+CSV local. Ese runner no conecta todavia a SQL Server ni instala Windows
+Service.
+
+La Fase 9A-1 agrega, de forma separada y aditiva, el script PowerShell
+`scripts/sync-neptuno-catalog.ps1`. Este script consulta SQL Server con
+`ApplicationIntent=ReadOnly` y SQL `SELECT`-only, genera snapshots y delta
+incremental local, y permanece en dry-run salvo `-Send` explicito. No reemplaza
+los runners CSV ni sus endpoints.
+
+## Contrato delta Fase 9A-1
+
+El artefacto `changed-products.json` y el body opcional de `-Send` usan:
+
+```json
+{
+  "source": "neptuno",
+  "sourceKey": "neptuno-farmacia-universal",
+  "syncRunId": "neptuno-20260628T000000000Z-12345678",
+  "mode": "All",
+  "capturedAt": "2026-06-28T00:00:00Z",
+  "catalogItems": [],
+  "liveItems": []
+}
+```
+
+`catalogItems` contiene metadata factual de producto y nombres de secciones de
+vademecum. `liveItems` contiene precio/stock por bodega y captura operativa
+minima. Ninguno admite `fa_vademecum.cabecera`,
+`fa_seccion_vademecum.contenido`, bytes ni texto clinico decodificado.
+
+El endpoint delta no se hardcodea: debe proporcionarse por `-ApiUrl` o
+`VIDALINKCO_NEPTUNO_SYNC_URL`, debe usar HTTPS y debe responder con el envelope
+estandar. Hasta que Vidalinkco confirme un endpoint/DTO compatible, el contrato
+queda en dry-run y no debe usarse `-Send`. Detalle operativo:
+`docs/NEPTUNO_SYNC_AGENT_RUNBOOK.md`.
 
 ## Endpoints Vidalinkco
 
