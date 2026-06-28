@@ -45,6 +45,12 @@ factual; su fingerprint excluye precio. `liveChangedItems` contiene solamente
 cambios de precio/stock/estado por bodega. Ninguno admite `fa_vademecum.cabecera`,
 `fa_seccion_vademecum.contenido`, bytes ni texto clinico decodificado.
 
+Estos nombres son el contrato v2 estable de `changed-products.json`; ambos son
+arrays y pueden estar vacios. Los nombres legacy `catalogItems` y `liveItems`
+no forman parte del contrato delta v2. `ExternalIds` ausente o normalizado sin
+valores significa sin filtro y se reporta como `externalIdsFilterApplied=false`
+en el summary del run.
+
 Precio negativo queda bloqueado del live delta con `NEGATIVE_PRICE`. Stock
 negativo se normaliza a cero y conserva sus valores fuente con
 `NEGATIVE_STOCK_CLAMPED`. Quarantine es evidencia retenida por run, no dato

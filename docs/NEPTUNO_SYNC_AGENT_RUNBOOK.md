@@ -68,6 +68,11 @@ debe ejecutar primero `Bootstrap`.
 - `Audit`: diagnóstico amplio. Puede usar `AllForAudit`, genera evidencia y
   quarantine, nunca envía ni modifica el state permanente.
 
+`ExternalIds` acepta un ID (`-ExternalIds 9102`), varios
+(`-ExternalIds 9102,1982`) o puede omitirse. Se aplica trim, se eliminan vacíos
+y duplicados. Si no queda ningún ID, el valor interno es `null`, no se agrega
+filtro SQL y `externalIdsFilterApplied` queda `false`.
+
 `MaxProducts` es solamente un recorte técnico. No es elegibilidad comercial.
 `Eligibility` filtra oferta live; no elimina metadata del catálogo. En
 particular, `ActiveSellableWithStock` exige stock normalizado positivo en live,
@@ -201,6 +206,14 @@ El POST usa el contenido de `changed-products.json`:
 }
 ```
 
+Contrato v2 estable para consumidores:
+
+- leer `catalogChangedItems` como array de cambios maestros;
+- leer `liveChangedItems` como array de cambios operativos;
+- leer `quarantinedItems` como resumen, no como payload de producto;
+- no buscar los nombres legacy `catalogItems` / `liveItems` en este archivo;
+- ambos arrays pueden estar vacíos en un Incremental sin cambios.
+
 Esta es una extensión aditiva de Fase 9A-1B; no reemplaza los endpoints CSV
 documentados previamente. La URL configurada debe apuntar a un endpoint que
 acepte explícitamente este contrato delta y responda con envelope:
@@ -296,6 +309,7 @@ Successful send confirms state: OK
 Catalog/live delta separation: OK
 Negative live quarantine and stock clamp: OK
 ExternalIds and eligibility filters: OK
+Missing and empty ExternalIds binding: OK
 Audit no-send behavior: OK
 FailFast policy: OK
 Run retention and permanent state: OK

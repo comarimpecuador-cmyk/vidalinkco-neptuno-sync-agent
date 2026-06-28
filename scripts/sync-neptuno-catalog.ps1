@@ -25,6 +25,8 @@ param(
     [Nullable[int]]$MaxProducts,
 
     [Parameter()]
+    [AllowNull()]
+    [AllowEmptyCollection()]
     [string[]]$ExternalIds,
 
     [Parameter()]
@@ -157,7 +159,12 @@ function ConvertTo-NullableBool {
 }
 
 function Get-NormalizedExternalIds {
-    param([Parameter()][string[]]$Values)
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$Values
+    )
 
     $ids = [System.Collections.Generic.List[string]]::new()
     foreach ($value in @($Values)) {
@@ -177,6 +184,9 @@ function Get-NormalizedExternalIds {
     if ($ids.Count -gt 1000) {
         throw "ExternalIds accepts at most 1000 IDs per run."
     }
+    if ($ids.Count -eq 0) {
+        return $null
+    }
     return $ids.ToArray()
 }
 
@@ -184,14 +194,17 @@ function Add-ExternalIdsSqlFilter {
     param(
         [Parameter(Mandatory)][string]$Sql,
         [Parameter(Mandatory)][hashtable]$Parameters,
-        [Parameter(Mandatory)][string[]]$Ids
+        [Parameter()]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$Ids
     )
 
     $placeholder = '/*__EXTERNAL_IDS_FILTER__*/'
     if (-not $Sql.Contains($placeholder)) {
         throw "SQL query is missing the external IDs filter placeholder."
     }
-    if ($Ids.Count -eq 0) {
+    if ($null -eq $Ids -or @($Ids).Count -eq 0) {
         return [pscustomobject]@{
             Sql = $Sql.Replace($placeholder, '')
             Parameters = $Parameters
@@ -692,8 +705,8 @@ if ($RunType -eq "Incremental") {
     }
 }
 $effectiveMaxProducts = if ($null -eq $MaxProducts) { [int]::MaxValue } else { [int]$MaxProducts }
-$normalizedExternalIds = @(Get-NormalizedExternalIds -Values $ExternalIds)
-$externalIdsFilterApplied = $normalizedExternalIds.Count -gt 0
+$normalizedExternalIds = Get-NormalizedExternalIds -Values $ExternalIds
+$externalIdsFilterApplied = $null -ne $normalizedExternalIds
 $catalogEnabled = $Mode -in @("Catalog", "All")
 $liveEnabled = $Mode -in @("Live", "All")
 

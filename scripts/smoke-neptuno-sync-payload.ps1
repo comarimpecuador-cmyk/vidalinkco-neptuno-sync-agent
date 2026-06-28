@@ -37,6 +37,23 @@ function Assert-PowerShellParser {
     }
 }
 
+function Import-MainFunctionForSmoke {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    $functionAst = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name
+    }, $true))[0]
+    Assert-True -Condition ($null -ne $functionAst) -Message "Main function '$Name' was not found."
+    Set-Item -Path "Function:script:$Name" -Value $functionAst.Body.GetScriptBlock()
+}
+
 function Assert-SelectOnlySqlFile {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -158,6 +175,14 @@ Assert-PowerShellParser -Path $mainScript
 Assert-PowerShellParser -Path $PSCommandPath
 Assert-SelectOnlySqlFile -Path $catalogSqlPath
 Assert-SelectOnlySqlFile -Path $liveSqlPath
+Import-MainFunctionForSmoke -Path $mainScript -Name "Get-NormalizedExternalIds"
+Import-MainFunctionForSmoke -Path $mainScript -Name "Add-ExternalIdsSqlFilter"
+$normalizedMissingIds = Get-NormalizedExternalIds -Values @()
+Assert-True -Condition ($null -eq $normalizedMissingIds) -Message "Empty ExternalIds did not normalize to null."
+$normalizedIds = @(Get-NormalizedExternalIds -Values @(" 9102 ", "9102,1982", "", "1982"))
+Assert-True -Condition ($normalizedIds.Count -eq 2 -and $normalizedIds[0] -eq "9102" -and $normalizedIds[1] -eq "1982") -Message "ExternalIds trim/dedup normalization failed."
+$unfilteredSql = Add-ExternalIdsSqlFilter -Sql "SELECT 1 WHERE 1 = 1 /*__EXTERNAL_IDS_FILTER__*/;" -Parameters @{} -Ids $normalizedMissingIds
+Assert-True -Condition ($unfilteredSql.Sql -notmatch 'EXTERNAL_IDS_FILTER' -and $unfilteredSql.Parameters.Count -eq 0) -Message "Empty ExternalIds SQL binding failed."
 
 if ([System.IO.Directory]::Exists($resolvedOutputDirectory)) {
     $allowedSmokeRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "exports")).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
@@ -218,12 +243,16 @@ $state1 = Get-Content -Raw -LiteralPath (Join-Path $runOutput "state/fingerprint
 $cursors1 = Get-Content -Raw -LiteralPath (Join-Path $runOutput "state/cursors.json") -Encoding UTF8 | ConvertFrom-Json
 $catalog1 = Get-Content -Raw -LiteralPath (Join-Path $bootstrapRun "catalog-payload.json") -Encoding UTF8 | ConvertFrom-Json
 $live1 = Get-Content -Raw -LiteralPath (Join-Path $bootstrapRun "live-payload.json") -Encoding UTF8 | ConvertFrom-Json
+$delta1 = Get-Content -Raw -LiteralPath (Join-Path $bootstrapRun "changed-products.json") -Encoding UTF8 | ConvertFrom-Json
 $quarantine1 = Get-Content -Raw -LiteralPath (Join-Path $bootstrapRun "quarantine-items.json") -Encoding UTF8 | ConvertFrom-Json
 Assert-True -Condition ($summary1.runType -eq "Bootstrap") -Message "Bootstrap run type was not recorded."
+Assert-True -Condition ($summary1.externalIdsFilterApplied -eq $false) -Message "Missing ExternalIds was serialized as an applied filter."
 Assert-True -Condition ($summary1.dryRun -eq $true -and $summary1.sendAttempted -eq $false) -Message "Dry-run attempted network send."
 Assert-True -Condition ($summary1.changedCatalogItems -eq 6 -and $summary1.changedLiveItems -eq 5) -Message "Initial changed-products detection failed."
 Assert-True -Condition ($summary1.quarantinedItems -eq 2 -and $summary1.warnings -eq 1) -Message "Quarantine summary counts are invalid."
 Assert-True -Condition ($summary1.negativePriceItems -eq 1 -and $summary1.negativeStockItems -eq 1) -Message "Negative live counters are invalid."
+Assert-True -Condition ($null -ne $delta1.PSObject.Properties["catalogChangedItems"] -and $null -ne $delta1.PSObject.Properties["liveChangedItems"]) -Message "Delta v2 changed item arrays are missing."
+Assert-True -Condition ($null -eq $delta1.PSObject.Properties["catalogItems"] -and $null -eq $delta1.PSObject.Properties["liveItems"]) -Message "Legacy delta field names reappeared."
 Assert-True -Condition (@($catalog1.items[0].vademecumSecciones).Count -eq 4) -Message "Vademecum section metadata must be a flat string array."
 Assert-True -Condition ($catalog1.items[0].vademecumSecciones[0] -is [string]) -Message "Vademecum section metadata contains a nested value."
 Assert-True -Condition (@($state1.sentCatalog.PSObject.Properties).Count -eq 0 -and @($state1.sentLive.PSObject.Properties).Count -eq 0) -Message "Dry-run consumed pending send fingerprints."
@@ -298,6 +327,16 @@ Assert-True -Condition ($filteredSummary.externalIdsFilterApplied -eq $true) -Me
 Assert-True -Condition (@($filteredCatalog.items).Count -eq 2 -and @($filteredLive.items).Count -eq 2) -Message "ExternalIds did not filter catalog and live payloads."
 Assert-True -Condition (@($filteredCatalog.items | Where-Object { $_.externalId -notin @("9102", "1982") }).Count -eq 0) -Message "ExternalIds leaked another catalog item."
 Assert-True -Condition ($filteredSummary.runType -eq "Audit" -and $filteredSummary.sendAttempted -eq $false -and $filteredSummary.stateUpdated -eq $false) -Message "Audit run mutated state or attempted send."
+
+$emptyFilterOutput = Join-Path $resolvedOutputDirectory "empty-external-ids"
+$emptyFilterArguments = $commonArguments.Clone()
+$emptyFilterArguments["OutputDirectory"] = $emptyFilterOutput
+$emptyFilterArguments["ExternalIds"] = @("", " ", ",")
+$emptyFilterArguments["RunType"] = "Audit"
+& $mainScript @emptyFilterArguments
+$emptyFilterRun = Get-LatestRunDirectory -Root $emptyFilterOutput
+$emptyFilterSummary = Get-Content -Raw -LiteralPath (Join-Path $emptyFilterRun "sync-summary.json") -Encoding UTF8 | ConvertFrom-Json
+Assert-True -Condition ($emptyFilterSummary.externalIdsFilterApplied -eq $false -and $emptyFilterSummary.catalogItems -eq 6) -Message "Empty ExternalIds did not behave as no filter."
 
 $withStockOutput = Join-Path $resolvedOutputDirectory "active-with-stock"
 $withStockArguments = $commonArguments.Clone()
@@ -402,6 +441,7 @@ Write-Host "Successful send confirms state: OK"
 Write-Host "Catalog/live delta separation: OK"
 Write-Host "Negative live quarantine and stock clamp: OK"
 Write-Host "ExternalIds and eligibility filters: OK"
+Write-Host "Missing and empty ExternalIds binding: OK"
 Write-Host "Audit no-send behavior: OK"
 Write-Host "FailFast policy: OK"
 Write-Host "Run retention and permanent state: OK"
