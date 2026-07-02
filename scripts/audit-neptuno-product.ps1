@@ -16,14 +16,17 @@ param(
     [Nullable[long]]$VademecumId,
 
     [Parameter()]
-    [ValidateNotNullOrEmpty()]
-    [string]$OutputDirectory = (Join-Path (Split-Path -Parent $PSScriptRoot) "exports/local-audit"),
+    [string]$OutputDirectory,
 
     [Parameter()]
     [switch]$Export
 )
 
 $ErrorActionPreference = "Stop"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    $OutputDirectory = Join-Path $repoRoot "exports/local-audit"
+}
 $commonScript = Join-Path $PSScriptRoot "NeptunoAudit.Common.ps1"
 . $commonScript
 

@@ -1,14 +1,16 @@
 [CmdletBinding()]
 param(
     [Parameter()]
-    [ValidateNotNullOrEmpty()]
-    [string]$OutputDirectory = (Join-Path (Split-Path -Parent $PSScriptRoot) "exports/neptuno-sync-smoke")
+    [string]$OutputDirectory
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    $OutputDirectory = Join-Path $repoRoot "exports/neptuno-sync-smoke"
+}
 $mainScript = Join-Path $PSScriptRoot "sync-neptuno-catalog.ps1"
 $catalogSqlPath = Join-Path $repoRoot "docs/sql/neptuno-sync-catalog-query.sql"
 $liveSqlPath = Join-Path $repoRoot "docs/sql/neptuno-sync-live-query.sql"
@@ -522,9 +524,16 @@ $splitArguments["Mode"] = "Live"
 $splitState = Get-Content -Raw -LiteralPath (Join-Path $splitModeOutput "state/fingerprints.json") -Encoding UTF8 | ConvertFrom-Json
 Assert-True -Condition (@($splitState.catalog.PSObject.Properties).Count -eq 1 -and @($splitState.live.PSObject.Properties).Count -eq 1) -Message "Separate Catalog/Live bootstrap erased the untouched branch."
 
-$ignoredProbe = "exports/neptuno-sync-smoke/ignored-probe.json"
-$ignoreResult = & git -C $repoRoot check-ignore $ignoredProbe
-Assert-True -Condition ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($ignoreResult)) -Message "exports/ is not ignored by Git."
+$gitCommand = Get-Command git -ErrorAction SilentlyContinue
+$gitChecksAvailable = $null -ne $gitCommand
+if ($gitChecksAvailable) {
+    $ignoredProbe = "exports/neptuno-sync-smoke/ignored-probe.json"
+    $ignoreResult = & $gitCommand -C $repoRoot check-ignore $ignoredProbe
+    Assert-True -Condition ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($ignoreResult)) -Message "exports/ is not ignored by Git."
+}
+else {
+    Write-Host "Git not available; skipping git-based smoke checks."
+}
 
 $requiredOutputs = @(
     "catalog-payload.json",
@@ -578,7 +587,9 @@ Write-Host "FailFast policy: OK"
 Write-Host "Run retention and permanent state: OK"
 Write-Host "StartAfterExternalId lower bound: OK"
 Write-Host "Separate Catalog/Live state preservation: OK"
-Write-Host "Git ignore for exports: OK"
+if ($gitChecksAvailable) {
+    Write-Host "Git ignore for exports: OK"
+}
 Write-Host "No loose root artifacts: OK"
 Write-Host "Payload safety: OK"
 Write-Host "Dry-run network isolation: OK"

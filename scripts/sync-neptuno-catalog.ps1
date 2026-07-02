@@ -5,8 +5,7 @@ param(
     [string]$ConnectionString = "Data Source=localhost;Initial Catalog=NEPTUNO;Integrated Security=True;Encrypt=False;ApplicationIntent=ReadOnly",
 
     [Parameter()]
-    [ValidateNotNullOrEmpty()]
-    [string]$OutputDirectory = (Join-Path (Split-Path -Parent $PSScriptRoot) "exports/neptuno-sync"),
+    [string]$OutputDirectory,
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
@@ -113,6 +112,9 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    $OutputDirectory = Join-Path $repoRoot "exports/neptuno-sync"
+}
 . (Join-Path $PSScriptRoot "NeptunoAudit.Common.ps1")
 
 function Get-RowValue {
