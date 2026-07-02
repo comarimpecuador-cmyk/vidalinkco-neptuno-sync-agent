@@ -9,14 +9,14 @@ envio manual de stock/precio desde CSV local y envio manual de catalogo desde
 CSV local. Ese runner no conecta todavia a SQL Server ni instala Windows
 Service.
 
-La Fase 9A-1D agrega, de forma separada y aditiva, el script PowerShell
+La Fase 9A-5 mantiene, de forma separada y aditiva, el script PowerShell
 `scripts/sync-neptuno-catalog.ps1`. Este script consulta SQL Server con
 `ApplicationIntent=ReadOnly` y SQL `SELECT`-only, genera snapshots y delta
 incremental local, y permanece en dry-run salvo `-Send` explicito. Su operación
 permanente es `Bootstrap` una sola vez, seguida por `Incremental`; `Audit` nunca
 envía ni altera el state. No reemplaza los runners CSV ni sus endpoints.
 
-## Contrato delta Fase 9A-1D
+## Contrato delta Fase 9A-5
 
 El artefacto `changed-products.json` y el body opcional de `-Send` usan:
 
@@ -75,11 +75,27 @@ completado. La retención nunca elimina runs `running` o `interrupted`.
 El SQL operativo compara el ID numérico nativo y no depende de `TRY_CONVERT` ni
 `TRY_CAST`, para mantener compatibilidad con el SQL Server de farmacia.
 
-El endpoint delta no se hardcodea: debe proporcionarse por `-ApiUrl` o
-`VIDALINKCO_NEPTUNO_SYNC_URL`, debe usar HTTPS y debe responder con el envelope
-estandar. Hasta que Vidalinkco confirme un endpoint/DTO compatible, el contrato
-queda en dry-run y no debe usarse `-Send`. Detalle operativo:
-`docs/NEPTUNO_SYNC_AGENT_RUNBOOK.md`.
+El endpoint delta debe usar HTTPS y responder con el envelope estándar. El
+wrapper de producción lo construye desde `VidalinkcoBaseUrl` y lee la ApiKey
+local sin imprimirla. Detalle operativo: `docs/NEPTUNO_SYNC_AGENT_RUNBOOK.md`.
+
+## Contrato de baseline chunked
+
+`-InitialBaseline` conserva el mismo body v2, sin agregar campos que puedan
+romper el DTO web. Divide `catalogChangedItems` y `liveChangedItems` en requests
+de máximo 1000 elementos combinados; el default operativo es 500. Por ello cada
+request también respeta 5000 catálogo, 10000 live y 10000 combinados.
+
+Cada body usa un `syncRunId` y `idempotencyKey` únicos, deterministas a partir
+del parent run. `parentSyncRunId` permanece como metadata local en
+`runs/<parentSyncRunId>/chunks/manifest.json`; no amplía el contrato HTTP. El
+manifiesto y los resultados por chunk permiten reanudar, omitir chunks ya
+aceptados y reutilizar la misma clave ante un resultado HTTP ambiguo.
+
+El estado enviado se confirma solo después de completar todos los chunks. Un
+fallo mantiene el checkpoint y manifiesto reanudables, no reemplaza `latest` y
+no permite que el incremental normal eluda `MaxSendItems`. Este contrato ingiere
+staging NEPTUNO y nunca crea ni publica `Product` público.
 
 ## Endpoints Vidalinkco
 

@@ -72,8 +72,15 @@ param(
     [switch]$Send,
 
     [Parameter()]
-    [ValidateRange(1, 1000000)]
+    [ValidateRange(1, 1000)]
     [int]$MaxSendItems = 1000,
+
+    [Parameter()]
+    [switch]$InitialBaseline,
+
+    [Parameter()]
+    [ValidateRange(1, 1000)]
+    [int]$ChunkSize = 500,
 
     [Parameter()]
     [switch]$DryRun,
@@ -92,6 +99,10 @@ param(
 
     [Parameter(DontShow)]
     [switch]$MockSendSuccess,
+
+    [Parameter(DontShow)]
+    [ValidateRange(1, 1000000)]
+    [Nullable[int]]$MockChunkFailureAt,
 
     [Parameter(DontShow)]
     [ValidateRange(1, 1000000)]
@@ -700,6 +711,212 @@ function Write-JsonFileAtomic {
     }
 }
 
+function Get-OrCreateInitialBaselineChunkManifest {
+    param(
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [Parameter(Mandatory)][string]$ParentSyncRunId,
+        [Parameter(Mandatory)][int]$RequestedChunkSize,
+        [Parameter(Mandatory)]$DeltaPayload
+    )
+
+    $chunksDirectory = Join-Path $RunDirectory "chunks"
+    $manifestPath = Join-Path $chunksDirectory "manifest.json"
+    [System.IO.Directory]::CreateDirectory($chunksDirectory) | Out-Null
+
+    $catalogItems = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in @($DeltaPayload.catalogChangedItems)) {
+        if ($null -ne $item) { $catalogItems.Add($item) }
+    }
+    $liveItems = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in @($DeltaPayload.liveChangedItems)) {
+        if ($null -ne $item) { $liveItems.Add($item) }
+    }
+    $totalItems = $catalogItems.Count + $liveItems.Count
+    $expectedChunkCount = if ($totalItems -eq 0) { 0 } else { [int][Math]::Ceiling($totalItems / [double]$RequestedChunkSize) }
+    $deltaFingerprint = Get-StableFingerprint -Value $DeltaPayload
+
+    if ([System.IO.File]::Exists($manifestPath)) {
+        $manifest = Get-Content -Raw -LiteralPath $manifestPath -Encoding UTF8 | ConvertFrom-Json
+        $manifestFingerprintProperty = $manifest.PSObject.Properties["deltaFingerprint"]
+        if ([string]$manifest.parentSyncRunId -ne $ParentSyncRunId -or
+            [int]$manifest.chunkSize -ne $RequestedChunkSize -or
+            [int]$manifest.totalItems -ne $totalItems -or
+            [int]$manifest.totalChunks -ne $expectedChunkCount -or
+            $null -eq $manifestFingerprintProperty -or
+            [string]$manifestFingerprintProperty.Value -ne $deltaFingerprint) {
+            throw "Initial baseline chunk manifest does not match the resumed delta."
+        }
+        foreach ($chunk in @($manifest.chunks)) {
+            $payloadPath = Join-Path $RunDirectory ([string]$chunk.payloadRelativePath)
+            if (-not [System.IO.File]::Exists($payloadPath)) {
+                throw "Initial baseline chunk evidence is incomplete: missing payload for chunk $($chunk.index)."
+            }
+        }
+        return $manifest
+    }
+
+    $chunkEntries = [System.Collections.Generic.List[object]]::new()
+    $catalogIndex = 0
+    $liveIndex = 0
+    for ($chunkIndex = 1; $chunkIndex -le $expectedChunkCount; $chunkIndex++) {
+        $chunkCatalog = [System.Collections.Generic.List[object]]::new()
+        $chunkLive = [System.Collections.Generic.List[object]]::new()
+        while (($chunkCatalog.Count + $chunkLive.Count) -lt $RequestedChunkSize -and $catalogIndex -lt $catalogItems.Count) {
+            $chunkCatalog.Add($catalogItems[$catalogIndex])
+            $catalogIndex++
+        }
+        while (($chunkCatalog.Count + $chunkLive.Count) -lt $RequestedChunkSize -and $liveIndex -lt $liveItems.Count) {
+            $chunkLive.Add($liveItems[$liveIndex])
+            $liveIndex++
+        }
+
+        $chunkItemCount = $chunkCatalog.Count + $chunkLive.Count
+        if ($chunkItemCount -gt 1000 -or $chunkCatalog.Count -gt 5000 -or $chunkLive.Count -gt 10000 -or $chunkItemCount -gt 10000) {
+            throw "Initial baseline chunk exceeds the operational or web contract limits."
+        }
+
+        $chunkSyncRunId = "{0}-chunk-{1:D6}" -f $ParentSyncRunId, $chunkIndex
+        $chunkDirectoryName = "chunk-{0:D6}" -f $chunkIndex
+        $chunkDirectory = Join-Path $chunksDirectory $chunkDirectoryName
+        [System.IO.Directory]::CreateDirectory($chunkDirectory) | Out-Null
+        $payloadRelativePath = "chunks/$chunkDirectoryName/payload.json"
+        $chunkPayload = [pscustomobject][ordered]@{
+            contractVersion = [int]$DeltaPayload.contractVersion
+            source = [string]$DeltaPayload.source
+            sourceKey = [string]$DeltaPayload.sourceKey
+            syncRunId = $chunkSyncRunId
+            idempotencyKey = $chunkSyncRunId
+            runType = [string]$DeltaPayload.runType
+            mode = [string]$DeltaPayload.mode
+            capturedAt = [string]$DeltaPayload.capturedAt
+            catalogChangedItems = $chunkCatalog.ToArray()
+            liveChangedItems = $chunkLive.ToArray()
+            quarantinedItems = $(if ($chunkIndex -eq 1) {
+                $DeltaPayload.quarantinedItems
+            } else {
+                [pscustomobject][ordered]@{ total = 0; negativePrice = 0; negativeStockWarnings = 0 }
+            })
+        }
+        Write-JsonFileAtomic -Path (Join-Path $RunDirectory $payloadRelativePath) -Value $chunkPayload
+        $chunkEntries.Add([pscustomobject][ordered]@{
+            index = $chunkIndex
+            syncRunId = $chunkSyncRunId
+            idempotencyKey = $chunkSyncRunId
+            catalogItems = $chunkCatalog.Count
+            liveItems = $chunkLive.Count
+            itemCount = $chunkItemCount
+            payloadRelativePath = $payloadRelativePath
+            status = "pending"
+            attemptCount = 0
+            sentAt = $null
+        })
+    }
+
+    $createdAt = [DateTimeOffset]::UtcNow.ToString("o")
+    $manifest = [pscustomobject][ordered]@{
+        version = 1
+        mode = "initial-baseline"
+        parentSyncRunId = $ParentSyncRunId
+        chunkSize = $RequestedChunkSize
+        catalogItems = $catalogItems.Count
+        liveItems = $liveItems.Count
+        totalItems = $totalItems
+        totalChunks = $expectedChunkCount
+        deltaFingerprint = $deltaFingerprint
+        sentChunks = 0
+        status = "pending"
+        createdAt = $createdAt
+        updatedAt = $createdAt
+        completedAt = $null
+        chunks = $chunkEntries.ToArray()
+    }
+    Write-JsonFileAtomic -Path $manifestPath -Value $manifest
+    return $manifest
+}
+
+function Invoke-InitialBaselineChunkSend {
+    param(
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [Parameter(Mandatory)][string]$ParentSyncRunId,
+        [Parameter(Mandatory)][int]$RequestedChunkSize,
+        [Parameter(Mandatory)]$DeltaPayload,
+        [Parameter(Mandatory)][uri]$Uri,
+        [Parameter(Mandatory)][string]$BearerToken,
+        [Parameter(Mandatory)][bool]$UseMockSend,
+        [Parameter()][Nullable[int]]$FailAtChunk
+    )
+
+    $manifestPath = Join-Path $RunDirectory "chunks/manifest.json"
+    $manifest = Get-OrCreateInitialBaselineChunkManifest `
+        -RunDirectory $RunDirectory `
+        -ParentSyncRunId $ParentSyncRunId `
+        -RequestedChunkSize $RequestedChunkSize `
+        -DeltaPayload $DeltaPayload
+
+    foreach ($chunk in @($manifest.chunks)) {
+        if ([string]$chunk.status -eq "sent") { continue }
+
+        $chunkDirectory = Split-Path -Parent (Join-Path $RunDirectory ([string]$chunk.payloadRelativePath))
+        $resultPath = Join-Path $chunkDirectory "result.json"
+        $chunk.attemptCount = [int]$chunk.attemptCount + 1
+        $chunk.status = "sending"
+        $manifest.status = "sending"
+        $manifest.updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
+        Write-JsonFileAtomic -Path $manifestPath -Value $manifest
+
+        try {
+            if ($null -ne $FailAtChunk -and [int]$FailAtChunk -eq [int]$chunk.index) {
+                throw "Synthetic initial baseline chunk failure at chunk $($chunk.index)."
+            }
+            if (-not $UseMockSend) {
+                $chunkPayload = Get-Content -Raw -LiteralPath (Join-Path $RunDirectory ([string]$chunk.payloadRelativePath)) -Encoding UTF8 | ConvertFrom-Json
+                Invoke-DeltaSend -Uri $Uri -BearerToken $BearerToken -IdempotencyKey ([string]$chunk.idempotencyKey) -Payload $chunkPayload
+            }
+
+            $sentAt = [DateTimeOffset]::UtcNow.ToString("o")
+            $chunk.status = "sent"
+            $chunk.sentAt = $sentAt
+            $manifest.sentChunks = @($manifest.chunks | Where-Object { [string]$_.status -eq "sent" }).Count
+            $manifest.updatedAt = $sentAt
+            Write-JsonFileAtomic -Path $resultPath -Value ([pscustomobject][ordered]@{
+                parentSyncRunId = $ParentSyncRunId
+                syncRunId = [string]$chunk.syncRunId
+                idempotencyKey = [string]$chunk.idempotencyKey
+                chunkIndex = [int]$chunk.index
+                attemptCount = [int]$chunk.attemptCount
+                status = "sent"
+                sentAt = $sentAt
+            })
+            Write-JsonFileAtomic -Path $manifestPath -Value $manifest
+        }
+        catch {
+            $failedAt = [DateTimeOffset]::UtcNow.ToString("o")
+            $chunk.status = "failed"
+            $manifest.status = "failed"
+            $manifest.updatedAt = $failedAt
+            Write-JsonFileAtomic -Path $resultPath -Value ([pscustomobject][ordered]@{
+                parentSyncRunId = $ParentSyncRunId
+                syncRunId = [string]$chunk.syncRunId
+                idempotencyKey = [string]$chunk.idempotencyKey
+                chunkIndex = [int]$chunk.index
+                attemptCount = [int]$chunk.attemptCount
+                status = "failed"
+                failedAt = $failedAt
+                failureType = $_.Exception.GetType().Name
+            })
+            Write-JsonFileAtomic -Path $manifestPath -Value $manifest
+            throw
+        }
+    }
+
+    $manifest.sentChunks = @($manifest.chunks | Where-Object { [string]$_.status -eq "sent" }).Count
+    $manifest.status = "completed"
+    $manifest.completedAt = [DateTimeOffset]::UtcNow.ToString("o")
+    $manifest.updatedAt = $manifest.completedAt
+    Write-JsonFileAtomic -Path $manifestPath -Value $manifest
+    return $manifest
+}
+
 function Write-NdjsonBatchFile {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -831,7 +1048,8 @@ function Get-CompatibleIncompleteRun {
         [Parameter(Mandatory)][string]$Eligibility,
         [Parameter(Mandatory)][long]$BodegaId,
         [Parameter(Mandatory)][AllowEmptyString()][string]$ExternalIdsKey,
-        [Parameter(Mandatory)][bool]$SendRequested
+        [Parameter(Mandatory)][bool]$SendRequested,
+        [Parameter(Mandatory)][bool]$InitialBaselineRequested
     )
 
     if (-not [System.IO.Directory]::Exists($RunsDirectory)) {
@@ -842,13 +1060,16 @@ function Get-CompatibleIncompleteRun {
         if (-not [System.IO.File]::Exists($checkpointPath)) { continue }
         $checkpoint = Get-Content -Raw -LiteralPath $checkpointPath -Encoding UTF8 | ConvertFrom-Json
         if ($checkpoint.status -notin @("running", "interrupted", "failed")) { continue }
+        $checkpointInitialBaselineProperty = $checkpoint.PSObject.Properties["initialBaseline"]
+        $checkpointInitialBaseline = $null -ne $checkpointInitialBaselineProperty -and [bool]$checkpointInitialBaselineProperty.Value
         if ([string]$checkpoint.sourceKey -eq $SourceKey -and
             [string]$checkpoint.runType -eq $RunType -and
             [string]$checkpoint.mode -eq $Mode -and
             [string]$checkpoint.eligibility -eq $Eligibility -and
             [long]$checkpoint.bodegaId -eq $BodegaId -and
             [string]$checkpoint.externalIdsKey -eq $ExternalIdsKey -and
-            [bool]$checkpoint.sendRequested -eq $SendRequested) {
+            [bool]$checkpoint.sendRequested -eq $SendRequested -and
+            $checkpointInitialBaseline -eq $InitialBaselineRequested) {
             return [pscustomobject]@{ Directory = $run.FullName; Checkpoint = $checkpoint }
         }
     }
@@ -894,6 +1115,20 @@ if ([string]::IsNullOrWhiteSpace($SourceKey)) {
 if ($Send -and $DryRun) {
     throw "Use either -Send or -DryRun, not both."
 }
+if ($InitialBaseline -and -not $Send) {
+    throw "InitialBaseline requires -Send."
+}
+if ($InitialBaseline -and $RunType -ne "Incremental") {
+    throw "InitialBaseline requires RunType Incremental."
+}
+if ($InitialBaseline -and (
+    $PSBoundParameters.ContainsKey("MaxProducts") -or
+    $PSBoundParameters.ContainsKey("StartAfterExternalId") -or
+    $PSBoundParameters.ContainsKey("MaxBatches") -or
+    $PSBoundParameters.ContainsKey("ExternalIds")
+)) {
+    throw "InitialBaseline requires the complete unfiltered dataset. MaxProducts, StartAfterExternalId, MaxBatches and ExternalIds are not allowed."
+}
 if ($RunType -eq "Audit" -and $Send) {
     throw "RunType Audit never sends data."
 }
@@ -902,6 +1137,9 @@ if ($RunType -eq "Incremental" -and $RebuildState) {
 }
 if ($MockSendSuccess -and -not $Send) {
     throw "MockSendSuccess is a smoke-only option and requires -Send."
+}
+if ($null -ne $MockChunkFailureAt -and (-not $InitialBaseline -or -not $MockSendSuccess)) {
+    throw "MockChunkFailureAt is a smoke-only option and requires InitialBaseline with MockSendSuccess."
 }
 $effectiveDryRun = -not $Send
 $effectiveApiUrl = if ([string]::IsNullOrWhiteSpace($ApiUrl)) { $env:VIDALINKCO_NEPTUNO_SYNC_URL } else { $ApiUrl }
@@ -946,6 +1184,21 @@ $externalIdsKey = if ($externalIdsFilterApplied) { @($normalizedExternalIds) -jo
 [System.IO.Directory]::CreateDirectory($latestDirectory) | Out-Null
 
 $resumeRun = $null
+if ($InitialBaseline -and -not $Resume) {
+    $existingBaselineRun = Get-CompatibleIncompleteRun `
+        -RunsDirectory $runsDirectory `
+        -SourceKey $SourceKey.Trim() `
+        -RunType $RunType `
+        -Mode $Mode `
+        -Eligibility $Eligibility `
+        -BodegaId $BodegaId `
+        -ExternalIdsKey $externalIdsKey `
+        -SendRequested $true `
+        -InitialBaselineRequested $true
+    if ($null -ne $existingBaselineRun) {
+        throw "An incomplete InitialBaseline already exists. Resume it with InitialBaseline and Resume before starting another baseline."
+    }
+}
 if ($Resume) {
     $resumeRun = Get-CompatibleIncompleteRun `
         -RunsDirectory $runsDirectory `
@@ -955,13 +1208,19 @@ if ($Resume) {
         -Eligibility $Eligibility `
         -BodegaId $BodegaId `
         -ExternalIdsKey $externalIdsKey `
-        -SendRequested ([bool]$Send)
+        -SendRequested ([bool]$Send) `
+        -InitialBaselineRequested ([bool]$InitialBaseline)
     if ($null -eq $resumeRun) {
         throw "Resume did not find a compatible incomplete run."
     }
     $runDirectory = $resumeRun.Directory
     $syncRunId = Split-Path -Leaf $runDirectory
+    $capturedAt = [string]$resumeRun.Checkpoint.startedAt
     $BatchSize = [int]$resumeRun.Checkpoint.batchSize
+    $savedChunkSizeProperty = $resumeRun.Checkpoint.PSObject.Properties["chunkSize"]
+    if ($null -ne $savedChunkSizeProperty) {
+        $ChunkSize = [int]$savedChunkSizeProperty.Value
+    }
     $StartAfterExternalId = [long]$resumeRun.Checkpoint.initialStartAfterExternalId
     $savedMaxProducts = $resumeRun.Checkpoint.PSObject.Properties["maxProducts"]
     if ($null -ne $savedMaxProducts -and $null -ne $savedMaxProducts.Value) {
@@ -1123,6 +1382,8 @@ $checkpoint = [pscustomobject][ordered]@{
     bodegaId = $BodegaId
     externalIdsKey = $externalIdsKey
     sendRequested = [bool]$Send
+    initialBaseline = [bool]$InitialBaseline
+    chunkSize = $ChunkSize
     batchSize = $BatchSize
     maxProducts = $(if ($null -eq $MaxProducts) { $null } else { [int]$MaxProducts })
     commandTimeoutSeconds = $CommandTimeoutSeconds
@@ -1538,19 +1799,37 @@ $sendStatus = "dry-run"
 $sendAttempted = $false
 $stateUpdated = $false
 $cursorsUpdated = $false
+$chunksTotal = 0
+$chunksSent = 0
 try {
     $changedSendItems = [long]$catalogChangedSeen + [long]$liveChangedSeen
-    if ($Send -and $changedSendItems -gt $MaxSendItems) {
+    if ($Send -and -not $InitialBaseline -and $changedSendItems -gt $MaxSendItems) {
         throw "Send guardrail blocked POST: changedCatalogItems + changedLiveItems is $changedSendItems, above MaxSendItems=$MaxSendItems."
     }
 
     if ($Send -and $changedSendItems -gt 0) {
         $sendAttempted = $true
-        if (-not $MockSendSuccess) {
-            $deltaPayload = Get-Content -Raw -LiteralPath (Join-Path $runDirectory "changed-products.json") -Encoding UTF8 | ConvertFrom-Json
-            Invoke-DeltaSend -Uri $parsedApiUri -BearerToken $effectiveApiToken -IdempotencyKey $syncRunId -Payload $deltaPayload
+        $deltaPayload = Get-Content -Raw -LiteralPath (Join-Path $runDirectory "changed-products.json") -Encoding UTF8 | ConvertFrom-Json
+        if ($InitialBaseline) {
+            $chunkManifest = Invoke-InitialBaselineChunkSend `
+                -RunDirectory $runDirectory `
+                -ParentSyncRunId $syncRunId `
+                -RequestedChunkSize $ChunkSize `
+                -DeltaPayload $deltaPayload `
+                -Uri $parsedApiUri `
+                -BearerToken $effectiveApiToken `
+                -UseMockSend ([bool]$MockSendSuccess) `
+                -FailAtChunk $MockChunkFailureAt
+            $chunksTotal = [int]$chunkManifest.totalChunks
+            $chunksSent = [int]$chunkManifest.sentChunks
+            $sendStatus = "sent-chunked"
         }
-        $sendStatus = "sent"
+        else {
+            if (-not $MockSendSuccess) {
+                Invoke-DeltaSend -Uri $parsedApiUri -BearerToken $effectiveApiToken -IdempotencyKey $syncRunId -Payload $deltaPayload
+            }
+            $sendStatus = "sent"
+        }
     }
     elseif ($Send) {
         $sendStatus = "no-changes"
@@ -1575,7 +1854,7 @@ try {
             sourceKey = $SourceKey.Trim()
             lastCatalogSyncAt = $(if ($catalogEnabled) { $stateUpdatedAt } else { $previousLastCatalogSyncAt })
             lastLiveSyncAt = $(if ($liveEnabled) { $stateUpdatedAt } else { $previousLastLiveSyncAt })
-            lastSuccessfulSendAt = $(if ($sendStatus -eq "sent") { $stateUpdatedAt } else { $previousLastSuccessfulSendAt })
+            lastSuccessfulSendAt = $(if ($sendStatus -in @("sent", "sent-chunked")) { $stateUpdatedAt } else { $previousLastSuccessfulSendAt })
             sourceHighWatermarks = [pscustomobject][ordered]@{
                 catalogLastExternalId = $(if ($catalogEnabled) { $catalogLastExternalId } else { $null })
                 liveLastExternalId = $(if ($liveEnabled) { $liveLastExternalId } else { $null })
@@ -1595,6 +1874,12 @@ try {
 }
 catch {
     $finalizationFailure = $_
+    $chunkManifestPath = Join-Path $runDirectory "chunks/manifest.json"
+    if ($InitialBaseline -and [System.IO.File]::Exists($chunkManifestPath)) {
+        $failedChunkManifest = Get-Content -Raw -LiteralPath $chunkManifestPath -Encoding UTF8 | ConvertFrom-Json
+        $chunksTotal = [int]$failedChunkManifest.totalChunks
+        $chunksSent = [int]$failedChunkManifest.sentChunks
+    }
     $failedAt = [DateTimeOffset]::UtcNow.ToString("o")
     $checkpoint.status = "failed"
     $checkpoint.updatedAt = $failedAt
@@ -1623,6 +1908,10 @@ catch {
         sendRequested = [bool]$Send
         sendAttempted = $sendAttempted
         sendStatus = "failed"
+        initialBaseline = [bool]$InitialBaseline
+        chunkSize = $(if ($InitialBaseline) { $ChunkSize } else { $null })
+        chunksTotal = $chunksTotal
+        chunksSent = $chunksSent
         batchesCompleted = $batchesCompleted
         catalogItems = $catalogItemsSeen
         liveItems = $liveEligibleSeen
@@ -1663,6 +1952,10 @@ $summary = [pscustomobject][ordered]@{
     sendRequested = [bool]$Send
     sendAttempted = $sendAttempted
     sendStatus = $sendStatus
+    initialBaseline = [bool]$InitialBaseline
+    chunkSize = $(if ($InitialBaseline) { $ChunkSize } else { $null })
+    chunksTotal = $chunksTotal
+    chunksSent = $chunksSent
     batchesCompleted = $batchesCompleted
     catalogItems = $catalogItemsSeen
     liveItems = $liveEligibleSeen

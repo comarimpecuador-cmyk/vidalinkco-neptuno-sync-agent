@@ -1,4 +1,4 @@
-# NEPTUNO Sync Agent Phase 9A-1D Permanent Runbook
+# NEPTUNO Sync Agent Phase 9A-5 Permanent Runbook
 
 ## Objetivo y alcance
 
@@ -53,7 +53,9 @@ una auditoría de esquema en la PC farmacia; no se debe adivinar el join.
 -RunType           Bootstrap, Incremental (default) o Audit
 -RetentionRuns     runs conservados; default 20
 -Send              habilita explícitamente el POST
--MaxSendItems      máximo de cambios permitidos antes del POST; default 1000
+-MaxSendItems      máximo para POST normal; default y máximo 1000
+-InitialBaseline   habilita explícitamente el baseline enviado por chunks
+-ChunkSize         elementos combinados por chunk; default 500, máximo 1000
 -DryRun            explícito; sin -Send el dry-run es siempre true
 -ApiUrl             parámetro o VIDALINKCO_NEPTUNO_SYNC_URL
 -ApiToken           parámetro o VIDALINKCO_NEPTUNO_SYNC_TOKEN
@@ -342,6 +344,59 @@ El envío agrega `Authorization: Bearer ...` e `Idempotency-Key`, usa timeout HT
 de 30 segundos y hasta tres intentos para errores transitorios. No envía cuando
 no hay cambios.
 
+## Baseline inicial por chunks
+
+Fase 9A-5 mantiene el guardrail normal en 1000. No se debe elevar
+`MaxSendItems` para enviar decenas de miles de cambios en un único request. El
+baseline inicial usa un modo explícito y exclusivo:
+
+```powershell
+.\scripts\run-neptuno-sync-production.ps1 -InitialBaseline -ChunkSize 500
+```
+
+Ejecútelo una sola vez, en horario controlado y después de revisar el Bootstrap
+y el dry-run. `InitialBaseline` no acepta `ExternalIds`, `MaxProducts`,
+`StartAfterExternalId` ni `MaxBatches`: debe representar el conjunto completo.
+Cada request contiene como máximo 1000 elementos combinados; el default
+operativo es 500. Esto queda por debajo de los límites del contrato web: 5000
+catálogo, 10000 live y 10000 combinados por request.
+
+Cada chunk conserva en `runs/<parentSyncRunId>/chunks/`:
+
+```text
+manifest.json
+chunk-000001/payload.json
+chunk-000001/result.json
+...
+```
+
+El manifiesto registra `parentSyncRunId`, tamaño, conteos, estado y número de
+intentos. Cada payload tiene `syncRunId` e `idempotencyKey` únicos y
+deterministas. Si el proceso falla después de que Vidalinkco aceptó un chunk,
+la misma clave se reutiliza de forma segura y los chunks ya marcados `sent` no
+se retransmiten.
+
+Reanudación del mismo baseline:
+
+```powershell
+.\scripts\run-neptuno-sync-production.ps1 -InitialBaseline -Resume
+```
+
+Los fingerprints `sentCatalog`/`sentLive` se confirman únicamente cuando todos
+los chunks terminan. Un fallo intermedio conserva checkpoint y manifiesto, no
+actualiza el estado permanente y no reemplaza `latest`.
+
+Secuencia operativa obligatoria:
+
+1. Ejecutar `InitialBaseline` en horario controlado y verificar manifiesto,
+   resultados y `sendStatus=sent-chunked`.
+2. Ejecutar `run-neptuno-sync-production.ps1 -DryRun`; el delta esperado debe
+   ser cero salvo cambios ocurridos después del baseline.
+3. Habilitar el scheduler incremental normal, sin `InitialBaseline`.
+
+Este flujo solo alimenta staging NEPTUNO. No crea, activa, publica ni indexa
+`Product` público.
+
 ## Windows Task Scheduler
 
 Antes de programar producción, complete una vez el Bootstrap documentado,
@@ -419,6 +474,7 @@ contrato documentado por el proveedor, seguido de revisión humana.
 ```powershell
 .\scripts\smoke-neptuno-sync-payload.ps1
 .\scripts\smoke-run-neptuno-sync-production.ps1
+.\scripts\smoke-neptuno-initial-baseline.ps1
 ```
 
 El smoke usa fixture sintético, no abre SQL y no envía red. El envío exitoso y
@@ -430,6 +486,10 @@ El segundo smoke prueba el wrapper con configuración temporal: configuración
 válida, rechazo del dominio example, rechazo del ApiKey placeholder, aislamiento
 del token y `ExternalIds 9102` en dry-run. No lee ni modifica la configuración
 local real.
+El tercer smoke genera 1200 elementos sintéticos y valida tres chunks
+`500/500/200`, identidades únicas, máximo de 1000 por request, fallo reanudable,
+no retransmisión de chunks aceptados, transición a incremental y permanencia
+del guardrail no chunked.
 
 Salida esperada:
 
@@ -460,6 +520,8 @@ Send credential guards: OK
 - Ejecutar Bootstrap una vez y revisar su run antes de usar Incremental.
 - Mantener `BatchSize=500` inicialmente y ajustar solo con evidencia de tiempo/carga.
 - Reanudar runs incompletos antes de iniciar otro Bootstrap sobre la misma salida.
+- No ejecutar otro `InitialBaseline` mientras exista uno fallido o incompleto;
+  reanudar el mismo parent run.
 - Usar `-MaxProducts` solo en una salida de prueba o Audit; no como filtro de negocio.
 - Revisar payloads y nombres de campos contra resultados reales.
 - Resolver el TODO de `pa_item_catalogo` mediante auditoría de esquema.
@@ -476,4 +538,6 @@ Send credential guards: OK
 - El envío es opt-in y no existe publicación automática.
 - El wrapper de producción centraliza configuración local, parámetros y límite
   pre-POST sin variables de entorno manuales.
+- El baseline chunked conserva idempotencia por request y confirma fingerprints
+  enviados solo al completar todos los chunks.
 - El vademécum permanece limitado a metadata no clínica.

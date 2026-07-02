@@ -9,8 +9,18 @@ param(
     [string[]]$ExternalIds,
 
     [Parameter()]
-    [ValidateRange(1, 1000000)]
-    [int]$MaxSendItems = 1000
+    [ValidateRange(1, 1000)]
+    [int]$MaxSendItems = 1000,
+
+    [Parameter()]
+    [switch]$InitialBaseline,
+
+    [Parameter()]
+    [ValidateRange(1, 1000)]
+    [int]$ChunkSize = 500,
+
+    [Parameter()]
+    [switch]$Resume
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +29,16 @@ Set-StrictMode -Version 2.0
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $configPath = Join-Path $repoRoot "Vidalinkco.NeptunoSyncAgent/appsettings.local.json"
 $syncScriptPath = Join-Path $PSScriptRoot "sync-neptuno-catalog.ps1"
+
+if ($InitialBaseline -and $DryRun) {
+    throw "Use InitialBaseline for chunked send or DryRun for validation, not both."
+}
+if ($InitialBaseline -and $null -ne $ExternalIds -and @($ExternalIds).Count -gt 0) {
+    throw "InitialBaseline requires the complete dataset and does not accept ExternalIds."
+}
+if ($Resume -and -not $InitialBaseline) {
+    throw "Resume is exposed by the production wrapper only for InitialBaseline."
+}
 
 if (-not [System.IO.File]::Exists($configPath)) {
     throw "Required local configuration was not found: $configPath"
@@ -84,6 +104,13 @@ if ($DryRun) {
 }
 else {
     $syncArguments["Send"] = $true
+}
+if ($InitialBaseline) {
+    $syncArguments["InitialBaseline"] = $true
+    $syncArguments["ChunkSize"] = $ChunkSize
+}
+if ($Resume) {
+    $syncArguments["Resume"] = $true
 }
 
 Push-Location -LiteralPath $repoRoot

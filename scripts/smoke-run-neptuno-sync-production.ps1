@@ -1,14 +1,16 @@
 [CmdletBinding()]
 param(
     [Parameter()]
-    [ValidateNotNullOrEmpty()]
-    [string]$OutputDirectory = (Join-Path (Split-Path -Parent $PSScriptRoot) "exports/neptuno-production-wrapper-smoke")
+    [string]$OutputDirectory
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    $OutputDirectory = Join-Path $repoRoot "exports/neptuno-production-wrapper-smoke"
+}
 $wrapperSourcePath = Join-Path $PSScriptRoot "run-neptuno-sync-production.ps1"
 $resolvedOutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 $sandboxRoot = Join-Path $resolvedOutputDirectory "sandbox"
@@ -66,6 +68,9 @@ param(
     [string]$ApiUrl,
     [string]$ApiToken,
     [int]$MaxSendItems,
+    [switch]$InitialBaseline,
+    [int]$ChunkSize,
+    [switch]$Resume,
     [string[]]$ExternalIds,
     [switch]$DryRun,
     [switch]$Send
@@ -82,6 +87,9 @@ $capture = [ordered]@{
     apiUrl = $ApiUrl
     apiTokenAccepted = $ApiToken -eq "smoke-secret-not-production"
     maxSendItems = $MaxSendItems
+    initialBaseline = [bool]$InitialBaseline
+    chunkSize = $ChunkSize
+    resume = [bool]$Resume
     externalIds = @($ExternalIds)
     dryRun = [bool]$DryRun
     send = [bool]$Send
@@ -110,6 +118,17 @@ Assert-True -Condition ($capture.maxSendItems -eq 321) -Message "Wrapper MaxSend
 Assert-True -Condition ($capture.dryRun -eq $true -and $capture.send -eq $false) -Message "Wrapper dry-run attempted send."
 Assert-True -Condition (@($capture.externalIds).Count -eq 1 -and $capture.externalIds[0] -eq "9102") -Message "Wrapper ExternalIds 9102 forwarding failed."
 
+$baselineOutput = & $wrapperPath -InitialBaseline -ChunkSize 500 6>&1 | Out-String
+$baselineCapture = Get-Content -Raw -LiteralPath $capturePath -Encoding UTF8 | ConvertFrom-Json
+Assert-True -Condition ($baselineCapture.initialBaseline -eq $true -and $baselineCapture.send -eq $true) -Message "Wrapper InitialBaseline did not use chunked send mode."
+Assert-True -Condition ($baselineCapture.chunkSize -eq 500 -and $baselineCapture.maxSendItems -eq 1000) -Message "Wrapper baseline safety limits changed."
+Assert-True -Condition ($baselineOutput -notmatch "smoke-secret-not-production") -Message "Wrapper exposed the token during baseline dispatch."
+
+$resumeOutput = & $wrapperPath -InitialBaseline -Resume 6>&1 | Out-String
+$resumeCapture = Get-Content -Raw -LiteralPath $capturePath -Encoding UTF8 | ConvertFrom-Json
+Assert-True -Condition ($resumeCapture.initialBaseline -eq $true -and $resumeCapture.resume -eq $true) -Message "Wrapper did not forward InitialBaseline resume."
+Assert-True -Condition ($resumeOutput -notmatch "smoke-secret-not-production") -Message "Wrapper exposed the token during baseline resume."
+
 Write-TestConfiguration -BaseUrl "https://vidalinkco.example.com" -ApiKey "smoke-secret-not-production"
 $exampleDomainRejected = $false
 try {
@@ -135,5 +154,6 @@ Write-Host "Valid local configuration: OK"
 Write-Host "Example domain rejection: OK"
 Write-Host "ApiKey placeholder rejection: OK"
 Write-Host "ExternalIds 9102 dry-run: OK"
+Write-Host "InitialBaseline and resume forwarding: OK"
 Write-Host "Token output isolation: OK"
 Write-Host "Smoke evidence root: $resolvedOutputDirectory"
