@@ -23,7 +23,8 @@ public sealed class HeartbeatRunner(
         var currentOptions = options.CurrentValue;
         currentOptions.ValidateForHeartbeat();
 
-        var payload = BuildPayload(currentOptions);
+        var summary = await ReadLatestSummaryAsync(currentOptions.SyncSummaryPath, cancellationToken);
+        var payload = BuildPayload(currentOptions, summary);
 
         if (currentOptions.DryRun)
         {
@@ -45,14 +46,51 @@ public sealed class HeartbeatRunner(
         }, cancellationToken);
     }
 
-    private static HeartbeatPayload BuildPayload(NeptunoSyncAgentOptions options)
+    private async Task<NeptunoSyncSummarySnapshot?> ReadLatestSummaryAsync(
+        string configuredPath,
+        CancellationToken cancellationToken)
+    {
+        var summaryPath = Path.GetFullPath(configuredPath.Trim());
+        if (!File.Exists(summaryPath))
+        {
+            logger.LogWarning("NEPTUNO sync summary was not found at {SummaryPath}. Heartbeat will be sent without sync counters.", summaryPath);
+            return null;
+        }
+
+        try
+        {
+            await using var stream = File.OpenRead(summaryPath);
+            return await JsonSerializer.DeserializeAsync<NeptunoSyncSummarySnapshot>(stream, JsonOptions, cancellationToken);
+        }
+        catch (JsonException exception)
+        {
+            logger.LogWarning(exception, "NEPTUNO sync summary was invalid at {SummaryPath}. Heartbeat will be sent without sync counters.", summaryPath);
+            return null;
+        }
+    }
+
+    private static HeartbeatPayload BuildPayload(
+        NeptunoSyncAgentOptions options,
+        NeptunoSyncSummarySnapshot? summary)
     {
         return new HeartbeatPayload(
             AgentId: options.AgentId.Trim(),
             Source: options.Source.Trim().ToLowerInvariant(),
+            SourceKey: string.IsNullOrWhiteSpace(summary?.SourceKey) ? options.Source.Trim().ToLowerInvariant() : summary.SourceKey.Trim(),
             MachineName: options.EffectiveMachineName,
             Version: options.Version.Trim(),
+            LocalTime: DateTimeOffset.Now,
             OccurredAtUtc: DateTimeOffset.UtcNow,
+            TaskMode: "heartbeat",
+            LastSyncRunId: summary?.SyncRunId,
+            LastSyncCompletedAt: summary?.CompletedAt,
+            LastSendStatus: NormalizeSendStatus(summary?.SendStatus),
+            CatalogItems: summary?.CatalogItems,
+            LiveItems: summary?.LiveItems,
+            ChangedCatalogItems: summary?.ChangedCatalogItems,
+            ChangedLiveItems: summary?.ChangedLiveItems,
+            QuarantinedItems: summary?.QuarantinedItems,
+            Warnings: summary?.Warnings,
             Status: "online",
             Mode: options.DryRun ? "dry-run" : "live",
             DryRun: options.DryRun,
@@ -70,5 +108,17 @@ public sealed class HeartbeatRunner(
                 OsDescription: RuntimeInformation.OSDescription,
                 ProcessArchitecture: RuntimeInformation.ProcessArchitecture.ToString(),
                 DotnetVersion: Environment.Version.ToString()));
+    }
+
+    private static string? NormalizeSendStatus(string? sendStatus)
+    {
+        return sendStatus?.Trim().ToLowerInvariant() switch
+        {
+            "sent" or "sent-chunked" => "sent",
+            "failed" => "error",
+            "no-changes" => "no-changes",
+            null or "" => null,
+            var value => value
+        };
     }
 }

@@ -97,6 +97,14 @@ fallo mantiene el checkpoint y manifiesto reanudables, no reemplaza `latest` y
 no permite que el incremental normal eluda `MaxSendItems`. Este contrato ingiere
 staging NEPTUNO y nunca crea ni publica `Product` público.
 
+Fase 9A-5B mantiene la identidad de cada chunk y agrega control operativo de
+rate limit. Existe una pausa configurable entre chunks, con default 5 segundos.
+HTTP 429 reutiliza el mismo body e `idempotencyKey`, respeta `Retry-After` y usa
+120 segundos cuando el servidor no lo proporciona. `MaxChunkAttempts` tiene
+default 8 por invocación; los intentos totales continúan auditados en el
+manifiesto. Solo al agotarse los intentos el chunk queda `failed`, todavía
+reanudable sobre el mismo `parentSyncRunId`.
+
 ## Endpoints Vidalinkco
 
 Base URL configurable por ambiente:
@@ -137,9 +145,21 @@ Payload:
 {
   "agentId": "farmacia-principal-neptuno-001",
   "source": "neptuno",
+  "sourceKey": "neptuno-farmacia-universal",
   "machineName": "PC-FARMACIA-01",
   "version": "0.1.0",
+  "localTime": "2026-07-02T10:00:00-05:00",
   "occurredAtUtc": "2026-06-22T02:15:00Z",
+  "taskMode": "heartbeat",
+  "lastSyncRunId": "sync-run-id",
+  "lastSyncCompletedAt": "2026-07-02T09:58:00-05:00",
+  "lastSendStatus": "no-changes",
+  "catalogItems": 50000,
+  "liveItems": 1200,
+  "changedCatalogItems": 0,
+  "changedLiveItems": 0,
+  "quarantinedItems": 0,
+  "warnings": 0,
   "status": "online",
   "mode": "dry-run",
   "dryRun": true,
@@ -162,6 +182,12 @@ Payload:
   }
 }
 ```
+
+Fase 9C-2 obtiene estos campos leyendo exclusivamente
+`exports/neptuno-sync/latest/sync-summary.json`. El heartbeat no abre SQL Server,
+no recorre catálogo y funciona cuando `lastSendStatus=no-changes`. El cliente usa
+Bearer token y nunca lo incluye en payload, salida o log. Para el panel,
+`sent-chunked` se normaliza a `sent` y `failed` a `error`.
 
 Respuesta esperada:
 

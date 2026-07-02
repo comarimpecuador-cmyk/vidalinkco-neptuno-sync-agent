@@ -20,6 +20,8 @@ public sealed class NeptunoSyncAgentOptions
 
     public int HeartbeatIntervalSeconds { get; set; } = 300;
 
+    public string SyncSummaryPath { get; set; } = "exports/neptuno-sync/latest/sync-summary.json";
+
     public int StockSyncIntervalSeconds { get; set; } = 900;
 
     public int BatchSize { get; set; } = 100;
@@ -57,6 +59,11 @@ public sealed class NeptunoSyncAgentOptions
         if (HeartbeatIntervalSeconds < 10)
         {
             throw new InvalidOperationException("NeptunoSyncAgent:HeartbeatIntervalSeconds must be at least 10.");
+        }
+
+        if (string.IsNullOrWhiteSpace(SyncSummaryPath))
+        {
+            throw new InvalidOperationException("NeptunoSyncAgent:SyncSummaryPath is required.");
         }
 
         if (StockSyncIntervalSeconds < 60)

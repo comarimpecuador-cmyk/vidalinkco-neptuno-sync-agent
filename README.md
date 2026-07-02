@@ -21,6 +21,12 @@ dotnet run --project .\Vidalinkco.NeptunoSyncAgent -- --heartbeat-once --dry-run
 
 Esto imprime el payload y escribe un registro local en `logs/agent.log`. No envia datos a Vidalinkco.
 
+Para la operación programada use el wrapper, que lee únicamente el último summary y no consulta SQL:
+
+```powershell
+.\scripts\run-neptuno-heartbeat-production.ps1 -DryRun
+```
+
 ## Ejecutar heartbeat real
 
 Configura `appsettings.local.json` con:
@@ -41,7 +47,7 @@ Luego ejecuta:
 dotnet run --project .\Vidalinkco.NeptunoSyncAgent -- --heartbeat-once
 ```
 
-El cliente enviara `POST /api/integrations/neptuno/heartbeat` con el header `x-vidalinkco-integration-key`. No imprimas ni pegues la API key en logs, issues o commits.
+El cliente enviara `POST /api/integrations/neptuno/heartbeat` con Bearer token. El wrapper real es `scripts/run-neptuno-heartbeat-production.ps1`; usa el mismo `appsettings.local.json` y lee `exports/neptuno-sync/latest/sync-summary.json`. No imprimas ni pegues la API key en logs, issues o commits.
 
 ## CSV stock/precio
 

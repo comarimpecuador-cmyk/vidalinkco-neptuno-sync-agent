@@ -425,6 +425,26 @@ Antes de programar producción, complete una vez el Bootstrap documentado,
 revise el dry-run del wrapper y confirme que la cuenta de Windows puede leer
 NEPTUNO, el repositorio y `appsettings.local.json`.
 
+Configure dos tareas separadas. No ejecute el sync completo cada cinco minutos:
+
+1. `Vidalinkco NEPTUNO Sync`: cada 30 minutos, ejecuta
+   `scripts/run-neptuno-sync-production.ps1` y realiza la revisión SQL completa.
+2. `Vidalinkco NEPTUNO Heartbeat`: cada 5 minutos, ejecuta
+   `scripts/run-neptuno-heartbeat-production.ps1`, lee solamente
+   `exports/neptuno-sync/latest/sync-summary.json` y envía la señal operativa.
+
+Acción del heartbeat oculto:
+
+```text
+Program/script: powershell.exe
+Add arguments: -WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\ruta\vidalinkco-neptuno-sync-agent\scripts\run-neptuno-heartbeat-production.ps1"
+Start in: C:\ruta\vidalinkco-neptuno-sync-agent
+```
+
+En ambas tareas seleccione `Do not start a new instance`. El heartbeat reutiliza
+`Vidalinkco.NeptunoSyncAgent/appsettings.local.json`; no coloque URL, token ni
+API key en argumentos del programador.
+
 1. Abra **Task Scheduler** y seleccione **Create Task** (no Basic Task).
 2. En **General**, use una cuenta de servicio con los permisos mínimos
    necesarios, active **Run whether user is logged on or not** y **Run with

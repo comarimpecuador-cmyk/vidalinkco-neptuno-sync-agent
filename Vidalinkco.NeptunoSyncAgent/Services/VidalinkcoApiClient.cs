@@ -23,7 +23,7 @@ public sealed class VidalinkcoApiClient(
         var currentOptions = options.CurrentValue;
         currentOptions.ValidateForHeartbeat();
 
-        using var httpClient = CreateClient(currentOptions);
+        using var httpClient = CreateClient(currentOptions, useBearerToken: true);
         using var response = await httpClient.PostAsJsonAsync(HeartbeatEndpoint, payload, cancellationToken);
         var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
 
@@ -142,7 +142,7 @@ public sealed class VidalinkcoApiClient(
         return envelope.Data ?? new CatalogResponse(DateTimeOffset.UtcNow, "ok", payload.Items.Count, payload.Items.Count);
     }
 
-    private static HttpClient CreateClient(NeptunoSyncAgentOptions options)
+    private static HttpClient CreateClient(NeptunoSyncAgentOptions options, bool useBearerToken = false)
     {
         var httpClient = new HttpClient
         {
@@ -151,7 +151,14 @@ public sealed class VidalinkcoApiClient(
         };
 
         httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        httpClient.DefaultRequestHeaders.Add(IntegrationKeyHeaderName, options.ApiKey.Trim());
+        if (useBearerToken)
+        {
+            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey.Trim());
+        }
+        else
+        {
+            httpClient.DefaultRequestHeaders.Add(IntegrationKeyHeaderName, options.ApiKey.Trim());
+        }
         return httpClient;
     }
 
