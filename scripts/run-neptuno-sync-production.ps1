@@ -20,6 +20,14 @@ param(
     [int]$ChunkSize = 500,
 
     [Parameter()]
+    [ValidateRange(0, 3600)]
+    [int]$ChunkDelaySeconds = 5,
+
+    [Parameter()]
+    [ValidateRange(1, 100)]
+    [int]$MaxChunkAttempts = 8,
+
+    [Parameter()]
     [switch]$Resume
 )
 
@@ -108,6 +116,8 @@ else {
 if ($InitialBaseline) {
     $syncArguments["InitialBaseline"] = $true
     $syncArguments["ChunkSize"] = $ChunkSize
+    $syncArguments["ChunkDelaySeconds"] = $ChunkDelaySeconds
+    $syncArguments["MaxChunkAttempts"] = $MaxChunkAttempts
 }
 if ($Resume) {
     $syncArguments["Resume"] = $true

@@ -70,6 +70,8 @@ param(
     [int]$MaxSendItems,
     [switch]$InitialBaseline,
     [int]$ChunkSize,
+    [int]$ChunkDelaySeconds,
+    [int]$MaxChunkAttempts,
     [switch]$Resume,
     [string[]]$ExternalIds,
     [switch]$DryRun,
@@ -89,6 +91,8 @@ $capture = [ordered]@{
     maxSendItems = $MaxSendItems
     initialBaseline = [bool]$InitialBaseline
     chunkSize = $ChunkSize
+    chunkDelaySeconds = $ChunkDelaySeconds
+    maxChunkAttempts = $MaxChunkAttempts
     resume = [bool]$Resume
     externalIds = @($ExternalIds)
     dryRun = [bool]$DryRun
@@ -118,15 +122,17 @@ Assert-True -Condition ($capture.maxSendItems -eq 321) -Message "Wrapper MaxSend
 Assert-True -Condition ($capture.dryRun -eq $true -and $capture.send -eq $false) -Message "Wrapper dry-run attempted send."
 Assert-True -Condition (@($capture.externalIds).Count -eq 1 -and $capture.externalIds[0] -eq "9102") -Message "Wrapper ExternalIds 9102 forwarding failed."
 
-$baselineOutput = & $wrapperPath -InitialBaseline -ChunkSize 500 6>&1 | Out-String
+$baselineOutput = & $wrapperPath -InitialBaseline -ChunkSize 500 -ChunkDelaySeconds 7 -MaxChunkAttempts 9 6>&1 | Out-String
 $baselineCapture = Get-Content -Raw -LiteralPath $capturePath -Encoding UTF8 | ConvertFrom-Json
 Assert-True -Condition ($baselineCapture.initialBaseline -eq $true -and $baselineCapture.send -eq $true) -Message "Wrapper InitialBaseline did not use chunked send mode."
 Assert-True -Condition ($baselineCapture.chunkSize -eq 500 -and $baselineCapture.maxSendItems -eq 1000) -Message "Wrapper baseline safety limits changed."
+Assert-True -Condition ($baselineCapture.chunkDelaySeconds -eq 7 -and $baselineCapture.maxChunkAttempts -eq 9) -Message "Wrapper baseline throttle settings were not forwarded."
 Assert-True -Condition ($baselineOutput -notmatch "smoke-secret-not-production") -Message "Wrapper exposed the token during baseline dispatch."
 
 $resumeOutput = & $wrapperPath -InitialBaseline -Resume 6>&1 | Out-String
 $resumeCapture = Get-Content -Raw -LiteralPath $capturePath -Encoding UTF8 | ConvertFrom-Json
 Assert-True -Condition ($resumeCapture.initialBaseline -eq $true -and $resumeCapture.resume -eq $true) -Message "Wrapper did not forward InitialBaseline resume."
+Assert-True -Condition ($resumeCapture.chunkDelaySeconds -eq 5 -and $resumeCapture.maxChunkAttempts -eq 8) -Message "Wrapper baseline throttle defaults changed."
 Assert-True -Condition ($resumeOutput -notmatch "smoke-secret-not-production") -Message "Wrapper exposed the token during baseline resume."
 
 Write-TestConfiguration -BaseUrl "https://vidalinkco.example.com" -ApiKey "smoke-secret-not-production"

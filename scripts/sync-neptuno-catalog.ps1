@@ -82,6 +82,14 @@ param(
     [int]$ChunkSize = 500,
 
     [Parameter()]
+    [ValidateRange(0, 3600)]
+    [int]$ChunkDelaySeconds = 5,
+
+    [Parameter()]
+    [ValidateRange(1, 100)]
+    [int]$MaxChunkAttempts = 8,
+
+    [Parameter()]
     [switch]$DryRun,
 
     [Parameter()]
@@ -102,6 +110,14 @@ param(
     [Parameter(DontShow)]
     [ValidateRange(1, 1000000)]
     [Nullable[int]]$MockChunkFailureAt,
+
+    [Parameter(DontShow)]
+    [ValidateRange(1, 1000000)]
+    [Nullable[int]]$MockChunkRateLimitAt,
+
+    [Parameter(DontShow)]
+    [ValidateRange(0, 3600)]
+    [Nullable[int]]$MockRetryAfterSeconds,
 
     [Parameter(DontShow)]
     [ValidateRange(1, 1000000)]
@@ -601,6 +617,9 @@ function Invoke-NeptunoSelectRows {
 function Get-HttpStatusCode {
     param([Parameter(Mandatory)]$Exception)
 
+    if ($null -ne $Exception.Data -and $Exception.Data.Contains("HttpStatusCode")) {
+        return [int]$Exception.Data["HttpStatusCode"]
+    }
     $responseProperty = $Exception.PSObject.Properties["Response"]
     if ($null -ne $responseProperty -and $null -ne $responseProperty.Value) {
         $statusProperty = $responseProperty.Value.PSObject.Properties["StatusCode"]
@@ -611,7 +630,40 @@ function Get-HttpStatusCode {
     return $null
 }
 
-function Invoke-DeltaSend {
+function Get-RetryAfterSeconds {
+    param(
+        [Parameter(Mandatory)]$Exception,
+        [Parameter()][ValidateRange(0, 86400)][int]$DefaultSeconds = 120
+    )
+
+    if ($null -ne $Exception.Data -and $Exception.Data.Contains("RetryAfterSeconds")) {
+        return [Math]::Max(0, [int]$Exception.Data["RetryAfterSeconds"])
+    }
+
+    $headerValue = $null
+    $responseProperty = $Exception.PSObject.Properties["Response"]
+    if ($null -ne $responseProperty -and $null -ne $responseProperty.Value) {
+        $headersProperty = $responseProperty.Value.PSObject.Properties["Headers"]
+        if ($null -ne $headersProperty -and $null -ne $headersProperty.Value) {
+            try { $headerValue = [string]$headersProperty.Value["Retry-After"] } catch { $headerValue = $null }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($headerValue)) {
+        return $DefaultSeconds
+    }
+
+    $deltaSeconds = 0
+    if ([int]::TryParse($headerValue.Trim(), [ref]$deltaSeconds)) {
+        return [Math]::Max(0, $deltaSeconds)
+    }
+    $retryAt = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse($headerValue.Trim(), [ref]$retryAt)) {
+        return [Math]::Max(0, [int][Math]::Ceiling(($retryAt.ToUniversalTime() - [DateTimeOffset]::UtcNow).TotalSeconds))
+    }
+    return $DefaultSeconds
+}
+
+function Invoke-DeltaRequest {
     param(
         [Parameter(Mandatory)][uri]$Uri,
         [Parameter(Mandatory)][string]$BearerToken,
@@ -624,14 +676,25 @@ function Invoke-DeltaSend {
         "Idempotency-Key" = $IdempotencyKey
     }
     $body = $Payload | ConvertTo-Json -Compress -Depth 30
+    $response = Invoke-WebRequest -Uri $Uri -Method Post -Headers $headers -Body $body -ContentType "application/json; charset=utf-8" -TimeoutSec 30 -UseBasicParsing
+    $envelope = $response.Content | ConvertFrom-Json
+    $okProperty = $envelope.PSObject.Properties["ok"]
+    if ($null -eq $okProperty -or -not [bool]$okProperty.Value) {
+        throw "Vidalinkco returned a rejected or invalid response envelope."
+    }
+}
+
+function Invoke-DeltaSend {
+    param(
+        [Parameter(Mandatory)][uri]$Uri,
+        [Parameter(Mandatory)][string]$BearerToken,
+        [Parameter(Mandatory)][string]$IdempotencyKey,
+        [Parameter(Mandatory)]$Payload
+    )
+
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
-            $response = Invoke-WebRequest -Uri $Uri -Method Post -Headers $headers -Body $body -ContentType "application/json; charset=utf-8" -TimeoutSec 30 -UseBasicParsing
-            $envelope = $response.Content | ConvertFrom-Json
-            $okProperty = $envelope.PSObject.Properties["ok"]
-            if ($null -eq $okProperty -or -not [bool]$okProperty.Value) {
-                throw "Vidalinkco returned a rejected or invalid response envelope."
-            }
+            Invoke-DeltaRequest -Uri $Uri -BearerToken $BearerToken -IdempotencyKey $IdempotencyKey -Payload $Payload
             return
         }
         catch {
@@ -749,6 +812,12 @@ function Get-OrCreateInitialBaselineChunkManifest {
             throw "Initial baseline chunk manifest does not match the resumed delta."
         }
         foreach ($chunk in @($manifest.chunks)) {
+            if ($null -eq $chunk.PSObject.Properties["rateLimitCount"]) {
+                $chunk | Add-Member -NotePropertyName rateLimitCount -NotePropertyValue 0
+            }
+            if ($null -eq $chunk.PSObject.Properties["lastRetryAfterSeconds"]) {
+                $chunk | Add-Member -NotePropertyName lastRetryAfterSeconds -NotePropertyValue $null
+            }
             $payloadPath = Join-Path $RunDirectory ([string]$chunk.payloadRelativePath)
             if (-not [System.IO.File]::Exists($payloadPath)) {
                 throw "Initial baseline chunk evidence is incomplete: missing payload for chunk $($chunk.index)."
@@ -810,6 +879,8 @@ function Get-OrCreateInitialBaselineChunkManifest {
             payloadRelativePath = $payloadRelativePath
             status = "pending"
             attemptCount = 0
+            rateLimitCount = 0
+            lastRetryAfterSeconds = $null
             sentAt = $null
         })
     }
@@ -845,7 +916,11 @@ function Invoke-InitialBaselineChunkSend {
         [Parameter(Mandatory)][uri]$Uri,
         [Parameter(Mandatory)][string]$BearerToken,
         [Parameter(Mandatory)][bool]$UseMockSend,
-        [Parameter()][Nullable[int]]$FailAtChunk
+        [Parameter(Mandatory)][int]$DelayBetweenChunksSeconds,
+        [Parameter(Mandatory)][int]$MaximumAttemptsPerChunk,
+        [Parameter()][Nullable[int]]$FailAtChunk,
+        [Parameter()][Nullable[int]]$RateLimitAtChunk,
+        [Parameter()][Nullable[int]]$SimulatedRetryAfterSeconds
     )
 
     $manifestPath = Join-Path $RunDirectory "chunks/manifest.json"
@@ -856,58 +931,125 @@ function Invoke-InitialBaselineChunkSend {
         -DeltaPayload $DeltaPayload
 
     foreach ($chunk in @($manifest.chunks)) {
-        if ([string]$chunk.status -eq "sent") { continue }
+        if ([string]$chunk.status -eq "sent") {
+            Write-Host "Skipping chunk $($chunk.index)/$($manifest.totalChunks); already sent."
+            continue
+        }
 
         $chunkDirectory = Split-Path -Parent (Join-Path $RunDirectory ([string]$chunk.payloadRelativePath))
         $resultPath = Join-Path $chunkDirectory "result.json"
-        $chunk.attemptCount = [int]$chunk.attemptCount + 1
-        $chunk.status = "sending"
-        $manifest.status = "sending"
-        $manifest.updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
-        Write-JsonFileAtomic -Path $manifestPath -Value $manifest
-
-        try {
-            if ($null -ne $FailAtChunk -and [int]$FailAtChunk -eq [int]$chunk.index) {
-                throw "Synthetic initial baseline chunk failure at chunk $($chunk.index)."
-            }
-            if (-not $UseMockSend) {
-                $chunkPayload = Get-Content -Raw -LiteralPath (Join-Path $RunDirectory ([string]$chunk.payloadRelativePath)) -Encoding UTF8 | ConvertFrom-Json
-                Invoke-DeltaSend -Uri $Uri -BearerToken $BearerToken -IdempotencyKey ([string]$chunk.idempotencyKey) -Payload $chunkPayload
-            }
-
-            $sentAt = [DateTimeOffset]::UtcNow.ToString("o")
-            $chunk.status = "sent"
-            $chunk.sentAt = $sentAt
-            $manifest.sentChunks = @($manifest.chunks | Where-Object { [string]$_.status -eq "sent" }).Count
-            $manifest.updatedAt = $sentAt
-            Write-JsonFileAtomic -Path $resultPath -Value ([pscustomobject][ordered]@{
-                parentSyncRunId = $ParentSyncRunId
-                syncRunId = [string]$chunk.syncRunId
-                idempotencyKey = [string]$chunk.idempotencyKey
-                chunkIndex = [int]$chunk.index
-                attemptCount = [int]$chunk.attemptCount
-                status = "sent"
-                sentAt = $sentAt
-            })
-            Write-JsonFileAtomic -Path $manifestPath -Value $manifest
+        $chunkPayload = $null
+        if (-not $UseMockSend) {
+            $chunkPayload = Get-Content -Raw -LiteralPath (Join-Path $RunDirectory ([string]$chunk.payloadRelativePath)) -Encoding UTF8 | ConvertFrom-Json
         }
-        catch {
-            $failedAt = [DateTimeOffset]::UtcNow.ToString("o")
-            $chunk.status = "failed"
-            $manifest.status = "failed"
-            $manifest.updatedAt = $failedAt
-            Write-JsonFileAtomic -Path $resultPath -Value ([pscustomobject][ordered]@{
-                parentSyncRunId = $ParentSyncRunId
-                syncRunId = [string]$chunk.syncRunId
-                idempotencyKey = [string]$chunk.idempotencyKey
-                chunkIndex = [int]$chunk.index
-                attemptCount = [int]$chunk.attemptCount
-                status = "failed"
-                failedAt = $failedAt
-                failureType = $_.Exception.GetType().Name
-            })
+        $attemptInInvocation = 0
+        $chunkSent = $false
+
+        while (-not $chunkSent -and $attemptInInvocation -lt $MaximumAttemptsPerChunk) {
+            $attemptInInvocation++
+            $chunk.attemptCount = [int]$chunk.attemptCount + 1
+            $chunk.status = "sending"
+            $manifest.status = "sending"
+            $manifest.updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
             Write-JsonFileAtomic -Path $manifestPath -Value $manifest
-            throw
+            Write-Host "Sending chunk $($chunk.index)/$($manifest.totalChunks)..."
+
+            try {
+                if ($null -ne $FailAtChunk -and [int]$FailAtChunk -eq [int]$chunk.index) {
+                    $failure = [System.Exception]::new("Synthetic initial baseline chunk failure at chunk $($chunk.index).")
+                    $failure.Data["HttpStatusCode"] = 400
+                    throw $failure
+                }
+                if ($null -ne $RateLimitAtChunk -and [int]$RateLimitAtChunk -eq [int]$chunk.index -and $attemptInInvocation -eq 1) {
+                    $rateLimit = [System.Exception]::new("Synthetic HTTP 429 at chunk $($chunk.index).")
+                    $rateLimit.Data["HttpStatusCode"] = 429
+                    if ($null -ne $SimulatedRetryAfterSeconds) {
+                        $rateLimit.Data["RetryAfterSeconds"] = [int]$SimulatedRetryAfterSeconds
+                    }
+                    throw $rateLimit
+                }
+                if (-not $UseMockSend) {
+                    Invoke-DeltaRequest -Uri $Uri -BearerToken $BearerToken -IdempotencyKey ([string]$chunk.idempotencyKey) -Payload $chunkPayload
+                }
+
+                $sentAt = [DateTimeOffset]::UtcNow.ToString("o")
+                $chunk.status = "sent"
+                $chunk.sentAt = $sentAt
+                $manifest.sentChunks = @($manifest.chunks | Where-Object { [string]$_.status -eq "sent" }).Count
+                $manifest.updatedAt = $sentAt
+                Write-JsonFileAtomic -Path $resultPath -Value ([pscustomobject][ordered]@{
+                    parentSyncRunId = $ParentSyncRunId
+                    syncRunId = [string]$chunk.syncRunId
+                    idempotencyKey = [string]$chunk.idempotencyKey
+                    chunkIndex = [int]$chunk.index
+                    attemptCount = [int]$chunk.attemptCount
+                    rateLimitCount = [int]$chunk.rateLimitCount
+                    status = "sent"
+                    sentAt = $sentAt
+                })
+                Write-JsonFileAtomic -Path $manifestPath -Value $manifest
+                Write-Host "Chunk $($chunk.index) sent"
+                $chunkSent = $true
+            }
+            catch {
+                $statusCode = Get-HttpStatusCode -Exception $_.Exception
+                $transient = $null -eq $statusCode -or $statusCode -in @(408, 429, 500, 502, 503, 504)
+                if ($transient -and $attemptInInvocation -lt $MaximumAttemptsPerChunk) {
+                    $retryDelaySeconds = if ($statusCode -eq 429) {
+                        Get-RetryAfterSeconds -Exception $_.Exception -DefaultSeconds 120
+                    } else {
+                        [Math]::Min(120, [int][Math]::Pow(2, $attemptInInvocation - 1))
+                    }
+                    if ($statusCode -eq 429) {
+                        $chunk.rateLimitCount = [int]$chunk.rateLimitCount + 1
+                        $chunk.lastRetryAfterSeconds = $retryDelaySeconds
+                        Write-Host "HTTP 429 on chunk $($chunk.index); waiting $retryDelaySeconds seconds before retry..."
+                    }
+                    else {
+                        Write-Host "Transient send failure on chunk $($chunk.index); waiting $retryDelaySeconds seconds before retry..."
+                    }
+                    $chunk.status = "waiting-retry"
+                    $manifest.status = "waiting-retry"
+                    $manifest.updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
+                    Write-JsonFileAtomic -Path $resultPath -Value ([pscustomobject][ordered]@{
+                        parentSyncRunId = $ParentSyncRunId
+                        syncRunId = [string]$chunk.syncRunId
+                        idempotencyKey = [string]$chunk.idempotencyKey
+                        chunkIndex = [int]$chunk.index
+                        attemptCount = [int]$chunk.attemptCount
+                        status = "waiting-retry"
+                        httpStatusCode = $statusCode
+                        retryAfterSeconds = $retryDelaySeconds
+                    })
+                    Write-JsonFileAtomic -Path $manifestPath -Value $manifest
+                    if ($retryDelaySeconds -gt 0) { Start-Sleep -Seconds $retryDelaySeconds }
+                    continue
+                }
+
+                $failedAt = [DateTimeOffset]::UtcNow.ToString("o")
+                $chunk.status = "failed"
+                $manifest.status = "failed"
+                $manifest.updatedAt = $failedAt
+                Write-JsonFileAtomic -Path $resultPath -Value ([pscustomobject][ordered]@{
+                    parentSyncRunId = $ParentSyncRunId
+                    syncRunId = [string]$chunk.syncRunId
+                    idempotencyKey = [string]$chunk.idempotencyKey
+                    chunkIndex = [int]$chunk.index
+                    attemptCount = [int]$chunk.attemptCount
+                    status = "failed"
+                    httpStatusCode = $statusCode
+                    failedAt = $failedAt
+                    failureType = $_.Exception.GetType().Name
+                })
+                Write-JsonFileAtomic -Path $manifestPath -Value $manifest
+                throw
+            }
+        }
+
+        $remainingChunks = @($manifest.chunks | Where-Object { [string]$_.status -ne "sent" }).Count
+        if ($chunkSent -and $remainingChunks -gt 0 -and $DelayBetweenChunksSeconds -gt 0) {
+            Write-Host "Waiting $DelayBetweenChunksSeconds seconds before next chunk..."
+            Start-Sleep -Seconds $DelayBetweenChunksSeconds
         }
     }
 
@@ -1142,6 +1284,12 @@ if ($MockSendSuccess -and -not $Send) {
 }
 if ($null -ne $MockChunkFailureAt -and (-not $InitialBaseline -or -not $MockSendSuccess)) {
     throw "MockChunkFailureAt is a smoke-only option and requires InitialBaseline with MockSendSuccess."
+}
+if ($null -ne $MockChunkRateLimitAt -and (-not $InitialBaseline -or -not $MockSendSuccess)) {
+    throw "MockChunkRateLimitAt is a smoke-only option and requires InitialBaseline with MockSendSuccess."
+}
+if ($null -ne $MockRetryAfterSeconds -and $null -eq $MockChunkRateLimitAt) {
+    throw "MockRetryAfterSeconds requires MockChunkRateLimitAt."
 }
 $effectiveDryRun = -not $Send
 $effectiveApiUrl = if ([string]::IsNullOrWhiteSpace($ApiUrl)) { $env:VIDALINKCO_NEPTUNO_SYNC_URL } else { $ApiUrl }
@@ -1386,6 +1534,8 @@ $checkpoint = [pscustomobject][ordered]@{
     sendRequested = [bool]$Send
     initialBaseline = [bool]$InitialBaseline
     chunkSize = $ChunkSize
+    chunkDelaySeconds = $ChunkDelaySeconds
+    maxChunkAttempts = $MaxChunkAttempts
     batchSize = $BatchSize
     maxProducts = $(if ($null -eq $MaxProducts) { $null } else { [int]$MaxProducts })
     commandTimeoutSeconds = $CommandTimeoutSeconds
@@ -1821,7 +1971,11 @@ try {
                 -Uri $parsedApiUri `
                 -BearerToken $effectiveApiToken `
                 -UseMockSend ([bool]$MockSendSuccess) `
-                -FailAtChunk $MockChunkFailureAt
+                -DelayBetweenChunksSeconds $ChunkDelaySeconds `
+                -MaximumAttemptsPerChunk $MaxChunkAttempts `
+                -FailAtChunk $MockChunkFailureAt `
+                -RateLimitAtChunk $MockChunkRateLimitAt `
+                -SimulatedRetryAfterSeconds $MockRetryAfterSeconds
             $chunksTotal = [int]$chunkManifest.totalChunks
             $chunksSent = [int]$chunkManifest.sentChunks
             $sendStatus = "sent-chunked"
@@ -1912,6 +2066,8 @@ catch {
         sendStatus = "failed"
         initialBaseline = [bool]$InitialBaseline
         chunkSize = $(if ($InitialBaseline) { $ChunkSize } else { $null })
+        chunkDelaySeconds = $(if ($InitialBaseline) { $ChunkDelaySeconds } else { $null })
+        maxChunkAttempts = $(if ($InitialBaseline) { $MaxChunkAttempts } else { $null })
         chunksTotal = $chunksTotal
         chunksSent = $chunksSent
         batchesCompleted = $batchesCompleted
@@ -1956,6 +2112,8 @@ $summary = [pscustomobject][ordered]@{
     sendStatus = $sendStatus
     initialBaseline = [bool]$InitialBaseline
     chunkSize = $(if ($InitialBaseline) { $ChunkSize } else { $null })
+    chunkDelaySeconds = $(if ($InitialBaseline) { $ChunkDelaySeconds } else { $null })
+    maxChunkAttempts = $(if ($InitialBaseline) { $MaxChunkAttempts } else { $null })
     chunksTotal = $chunksTotal
     chunksSent = $chunksSent
     batchesCompleted = $batchesCompleted

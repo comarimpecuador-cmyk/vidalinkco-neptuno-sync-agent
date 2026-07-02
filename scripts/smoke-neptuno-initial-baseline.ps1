@@ -102,6 +102,7 @@ $fixture = [pscustomobject][ordered]@{
 
 $successOutput = Join-Path $resolvedOutputDirectory "success"
 Initialize-BaselineState -RunOutput $successOutput
+$rateLimitStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $successConsole = & $mainScript `
     -FixturePath $fixturePath `
     -OutputDirectory $successOutput `
@@ -117,7 +118,12 @@ $successConsole = & $mainScript `
     -Send `
     -InitialBaseline `
     -ChunkSize 500 `
+    -ChunkDelaySeconds 0 `
+    -MaxChunkAttempts 3 `
+    -MockChunkRateLimitAt 2 `
+    -MockRetryAfterSeconds 1 `
     -MockSendSuccess 6>&1 | Out-String
+$rateLimitStopwatch.Stop()
 $successRun = Get-NewestRunDirectory -RunOutput $successOutput
 $successManifest = Get-Content -Raw -LiteralPath (Join-Path $successRun "chunks/manifest.json") -Encoding UTF8 | ConvertFrom-Json
 $successSummary = Get-Content -Raw -LiteralPath (Join-Path $successRun "sync-summary.json") -Encoding UTF8 | ConvertFrom-Json
@@ -131,6 +137,12 @@ Assert-True -Condition (@($successManifest.chunks | Where-Object { $_.syncRunId 
 Assert-True -Condition ($successManifest.parentSyncRunId -eq $successSummary.syncRunId) -Message "Local parentSyncRunId evidence is missing."
 Assert-True -Condition ($successSummary.sendStatus -eq "sent-chunked" -and $successSummary.chunksSent -eq 3) -Message "Successful chunked baseline summary is invalid."
 Assert-True -Condition ($successConsole -notmatch [regex]::Escape($fakeToken)) -Message "Token appeared in successful baseline output."
+Assert-True -Condition ($successManifest.chunks[0].attemptCount -eq 1 -and $successManifest.chunks[1].attemptCount -eq 2 -and $successManifest.chunks[2].attemptCount -eq 1) -Message "HTTP 429 did not retry exactly the same chunk."
+Assert-True -Condition ($successManifest.chunks[1].rateLimitCount -eq 1 -and $successManifest.chunks[1].lastRetryAfterSeconds -eq 1) -Message "Retry-After evidence was not persisted."
+Assert-True -Condition ($rateLimitStopwatch.Elapsed.TotalMilliseconds -ge 800) -Message "HTTP 429 backoff wait was not executed."
+Assert-True -Condition ($successConsole -match "HTTP 429 on chunk 2; waiting 1 seconds before retry\.\.\.") -Message "HTTP 429 progress output is missing."
+Assert-True -Condition (@([regex]::Matches($successConsole, "Sending chunk 2/3\.\.\.")).Count -eq 2) -Message "HTTP 429 did not visibly retry chunk 2."
+Assert-True -Condition ($successConsole -match "Chunk 2 sent") -Message "Successful retry progress output is missing."
 foreach ($chunk in @($successManifest.chunks)) {
     Assert-True -Condition ([int]$chunk.itemCount -le 1000) -Message "A baseline request exceeded 1000 items."
     $chunkPayload = Get-Content -Raw -LiteralPath (Join-Path $successRun ([string]$chunk.payloadRelativePath)) -Encoding UTF8 | ConvertFrom-Json
@@ -157,6 +169,8 @@ try {
         -Send `
         -InitialBaseline `
         -ChunkSize 500 `
+        -ChunkDelaySeconds 0 `
+        -MaxChunkAttempts 3 `
         -MockSendSuccess `
         -MockChunkFailureAt 2 6>&1 | Out-String
 }
@@ -188,6 +202,8 @@ $resumeConsole = & $mainScript `
     -Send `
     -InitialBaseline `
     -ChunkSize 500 `
+    -ChunkDelaySeconds 0 `
+    -MaxChunkAttempts 3 `
     -Resume `
     -MockSendSuccess 6>&1 | Out-String
 $resumedManifest = Get-Content -Raw -LiteralPath (Join-Path $failedRun "chunks/manifest.json") -Encoding UTF8 | ConvertFrom-Json
@@ -196,6 +212,8 @@ Assert-True -Condition ($resumedManifest.status -eq "completed" -and $resumedMan
 Assert-True -Condition ($resumedManifest.chunks[0].attemptCount -eq 1 -and $resumedManifest.chunks[1].attemptCount -eq 2 -and $resumedManifest.chunks[2].attemptCount -eq 1) -Message "Resume retransmitted an already accepted chunk or lost retry evidence."
 Assert-True -Condition ($resumedSummary.resumed -eq $true -and $resumedSummary.sendStatus -eq "sent-chunked") -Message "Resumed baseline summary is invalid."
 Assert-True -Condition ($resumeConsole -notmatch [regex]::Escape($fakeToken)) -Message "Token appeared in resumed baseline output."
+Assert-True -Condition ($resumeConsole -notmatch "Sending chunk 1/3\.\.\.") -Message "Resume retransmitted an already sent chunk."
+Assert-True -Condition ($resumeConsole -match "Skipping chunk 1/3; already sent\.") -Message "Resume did not report the skipped sent chunk."
 $resumedState = Get-Content -Raw -LiteralPath (Join-Path $resumeOutput "state/fingerprints.json") -Encoding UTF8 | ConvertFrom-Json
 Assert-True -Condition (@($resumedState.sentCatalog.PSObject.Properties).Count -eq 1200) -Message "Completed baseline did not confirm sent catalog fingerprints."
 
@@ -248,6 +266,7 @@ Write-Host "1200 items to 3 chunks: OK"
 Write-Host "Unique syncRunId and idempotencyKey per chunk: OK"
 Write-Host "Maximum 1000 items per request: OK"
 Write-Host "Token output isolation: OK"
+Write-Host "HTTP 429 Retry-After backoff and same-chunk retry: OK"
 Write-Host "Mid-run failure and idempotent resume: OK"
 Write-Host "Post-baseline incremental transition: OK"
 Write-Host "Non-chunked MaxSendItems guard: OK"

@@ -56,6 +56,8 @@ una auditoría de esquema en la PC farmacia; no se debe adivinar el join.
 -MaxSendItems      máximo para POST normal; default y máximo 1000
 -InitialBaseline   habilita explícitamente el baseline enviado por chunks
 -ChunkSize         elementos combinados por chunk; default 500, máximo 1000
+-ChunkDelaySeconds pausa entre chunks enviados; default recomendado 5
+-MaxChunkAttempts  intentos por chunk en cada invocación; default 8
 -DryRun            explícito; sin -Send el dry-run es siempre true
 -ApiUrl             parámetro o VIDALINKCO_NEPTUNO_SYNC_URL
 -ApiToken           parámetro o VIDALINKCO_NEPTUNO_SYNC_TOKEN
@@ -351,7 +353,7 @@ Fase 9A-5 mantiene el guardrail normal en 1000. No se debe elevar
 baseline inicial usa un modo explícito y exclusivo:
 
 ```powershell
-.\scripts\run-neptuno-sync-production.ps1 -InitialBaseline -ChunkSize 500
+.\scripts\run-neptuno-sync-production.ps1 -InitialBaseline -ChunkSize 500 -ChunkDelaySeconds 5
 ```
 
 Ejecútelo una sola vez, en horario controlado y después de revisar el Bootstrap
@@ -376,11 +378,31 @@ deterministas. Si el proceso falla después de que Vidalinkco aceptó un chunk,
 la misma clave se reutiliza de forma segura y los chunks ya marcados `sent` no
 se retransmiten.
 
+Fase 9A-5B agrega throttle entre chunks y backoff específico para rate limit.
+Después de cada chunk aceptado espera `ChunkDelaySeconds` antes del siguiente.
+Ante HTTP 429 respeta `Retry-After` en segundos o fecha HTTP; si el header no
+existe o es inválido, espera 120 segundos. Reintenta el mismo payload con la
+misma `idempotencyKey` hasta `MaxChunkAttempts` por invocación. El
+`attemptCount` del manifiesto permanece acumulado entre reanudaciones.
+
+Progreso esperado:
+
+```text
+Sending chunk 31/102...
+HTTP 429 on chunk 31; waiting 120 seconds before retry...
+Sending chunk 31/102...
+Chunk 31 sent
+```
+
 Reanudación del mismo baseline:
 
 ```powershell
 .\scripts\run-neptuno-sync-production.ps1 -InitialBaseline -Resume
 ```
+
+El resume conserva el `parentSyncRunId`, omite chunks `sent` y permite volver a
+intentar chunks `failed`. No reinicie el baseline por un 429 ni ejecute el
+resume inmediatamente en paralelo con otro proceso todavía activo.
 
 Los fingerprints `sentCatalog`/`sentLive` se confirman únicamente cuando todos
 los chunks terminan. Un fallo intermedio conserva checkpoint y manifiesto, no
@@ -489,7 +511,8 @@ local real.
 El tercer smoke genera 1200 elementos sintéticos y valida tres chunks
 `500/500/200`, identidades únicas, máximo de 1000 por request, fallo reanudable,
 no retransmisión de chunks aceptados, transición a incremental y permanencia
-del guardrail no chunked.
+del guardrail no chunked. También simula HTTP 429 en chunk 2 con `Retry-After`,
+verifica la espera, el reintento con la misma identidad y el progreso sin token.
 
 Salida esperada:
 
