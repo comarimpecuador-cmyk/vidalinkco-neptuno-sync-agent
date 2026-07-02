@@ -53,6 +53,7 @@ una auditoría de esquema en la PC farmacia; no se debe adivinar el join.
 -RunType           Bootstrap, Incremental (default) o Audit
 -RetentionRuns     runs conservados; default 20
 -Send              habilita explícitamente el POST
+-MaxSendItems      máximo de cambios permitidos antes del POST; default 1000
 -DryRun            explícito; sin -Send el dry-run es siempre true
 -ApiUrl             parámetro o VIDALINKCO_NEPTUNO_SYNC_URL
 -ApiToken           parámetro o VIDALINKCO_NEPTUNO_SYNC_TOKEN
@@ -309,27 +310,67 @@ acepte explícitamente este contrato delta y responda con envelope:
 { "ok": true, "data": {} }
 ```
 
-No se debe usar `-Send` todavía ni hasta confirmar ese contrato en Vidalinkco.
-El script no asume ni concatena rutas de endpoint. Vidalinkco recibirá staging y
-deltas, no el universo completo de NEPTUNO en cada ejecución.
+Fase 9A-4 incorpora el wrapper oficial
+`scripts/run-neptuno-sync-production.ps1`. Lee exclusivamente
+`Vidalinkco.NeptunoSyncAgent/appsettings.local.json`, toma
+`NeptunoSyncAgent.VidalinkcoBaseUrl` y `NeptunoSyncAgent.ApiKey`, y construye
+`{VidalinkcoBaseUrl}/api/integrations/neptuno/sync`.
 
-Contrato futuro, no ejecutar todavía:
+El wrapper rechaza URL no HTTPS, el dominio `vidalinkco.example.com`, ApiKey
+vacía y el placeholder `replace-with-local-api-key-only`. Nunca imprime la
+ApiKey. El archivo local está ignorado por Git mediante `appsettings.local.json`
+y no debe copiarse a documentación, argumentos de tarea ni logs.
+
+Prueba dirigida sin POST:
 
 ```powershell
-$env:VIDALINKCO_NEPTUNO_SYNC_URL = "https://host-autorizado.example/api/ruta-configurada"
-$env:VIDALINKCO_NEPTUNO_SYNC_TOKEN = "valor-local-no-versionado"
-
-.\scripts\sync-neptuno-catalog.ps1 `
-  -OutputDirectory ".\exports\neptuno-sync" `
-  -BodegaId 1 `
-  -Mode All `
-  -RunType Incremental `
-  -Send
+.\scripts\run-neptuno-sync-production.ps1 -DryRun -ExternalIds 9102
 ```
 
-El envío agrega `Authorization: Bearer ...` e `Idempotency-Key`, usa timeout de
-30 segundos y hasta tres intentos para errores transitorios. No envía cuando no
-hay cambios.
+Ejecución productiva manual:
+
+```powershell
+.\scripts\run-neptuno-sync-production.ps1
+```
+
+Sin `-DryRun`, el wrapper usa `-Send`. Fija bodega 1, modo `All`, elegibilidad
+`ActiveSellableWithStock`, run `Incremental`, lotes de 500 y timeout SQL de 120
+segundos. `-ExternalIds` es opcional. `-MaxSendItems` tiene default 1000; si
+`changedCatalogItems + changedLiveItems` lo supera, el script falla antes del
+POST, no confirma fingerprints enviados y conserva evidencia del run fallido.
+El envío agrega `Authorization: Bearer ...` e `Idempotency-Key`, usa timeout HTTP
+de 30 segundos y hasta tres intentos para errores transitorios. No envía cuando
+no hay cambios.
+
+## Windows Task Scheduler
+
+Antes de programar producción, complete una vez el Bootstrap documentado,
+revise el dry-run del wrapper y confirme que la cuenta de Windows puede leer
+NEPTUNO, el repositorio y `appsettings.local.json`.
+
+1. Abra **Task Scheduler** y seleccione **Create Task** (no Basic Task).
+2. En **General**, use una cuenta de servicio con los permisos mínimos
+   necesarios, active **Run whether user is logged on or not** y **Run with
+   highest privileges** solo si el acceso local realmente lo exige.
+3. En **Triggers**, cree la frecuencia operativa acordada y evite ejecuciones
+   concurrentes.
+4. En **Actions**, cree **Start a program** con:
+
+   ```text
+   Program/script: powershell.exe
+   Add arguments: -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\ruta\vidalinkco-neptuno-sync-agent\scripts\run-neptuno-sync-production.ps1"
+   Start in: C:\ruta\vidalinkco-neptuno-sync-agent
+   ```
+
+5. En **Conditions**, configure red y energía según la PC farmacia.
+6. En **Settings**, seleccione **Do not start a new instance** si la tarea ya
+   está ejecutándose y habilite reintentos con una pausa prudente.
+7. Guarde, ejecute manualmente una vez y verifique `Last Run Result`, historial
+   y `exports/neptuno-sync/latest/sync-summary.json`.
+
+No agregue URL ni ApiKey en los argumentos de la tarea. Para una validación
+programada sin envío, agregue únicamente `-DryRun`; para una prueba dirigida,
+agregue `-DryRun -ExternalIds 9102`.
 
 ## Datos sincronizados
 
@@ -377,6 +418,7 @@ contrato documentado por el proveedor, seguido de revisión humana.
 
 ```powershell
 .\scripts\smoke-neptuno-sync-payload.ps1
+.\scripts\smoke-run-neptuno-sync-production.ps1
 ```
 
 El smoke usa fixture sintético, no abre SQL y no envía red. El envío exitoso y
@@ -384,6 +426,10 @@ el timeout se simulan con switches internos no operativos. Valida Bootstrap,
 Incremental, Audit, keyset por lotes, checkpoint, interrupción/reanudación,
 aislamiento de fallos, `StartAfterExternalId`, confirmación de state, separación
 catálogo/live, negativos, ExternalIds, retención y seguridad de payload.
+El segundo smoke prueba el wrapper con configuración temporal: configuración
+válida, rechazo del dominio example, rechazo del ApiKey placeholder, aislamiento
+del token y `ExternalIds 9102` en dry-run. No lee ni modifica la configuración
+local real.
 
 Salida esperada:
 
@@ -428,4 +474,6 @@ Send credential guards: OK
 - El estado incremental es local y no altera NEPTUNO.
 - La salida operacional no reemplaza el SSOT público de productos.
 - El envío es opt-in y no existe publicación automática.
+- El wrapper de producción centraliza configuración local, parámetros y límite
+  pre-POST sin variables de entorno manuales.
 - El vademécum permanece limitado a metadata no clínica.

@@ -341,6 +341,26 @@ Assert-True -Condition ($state1.catalog."9102" -eq $state2.catalog."9102") -Mess
 Assert-True -Condition ($state1.live."9102|1" -eq $state2.live."9102|1") -Message "Live fingerprint is not deterministic."
 Assert-True -Condition (@($state2.sentCatalog.PSObject.Properties).Count -eq 0 -and @($state2.sentLive.PSObject.Properties).Count -eq 0) -Message "Incremental dry-run consumed pending send fingerprints."
 
+$guardArguments = $commonArguments.Clone()
+[void]$guardArguments.Remove("DryRun")
+$guardArguments["Send"] = $true
+$guardArguments["MockSendSuccess"] = $true
+$guardArguments["RunType"] = "Incremental"
+$guardArguments["MaxSendItems"] = 10
+$sendLimitRejected = $false
+try {
+    & $mainScript @guardArguments
+}
+catch {
+    $sendLimitRejected = $_.Exception.Message -match "MaxSendItems=10"
+}
+Assert-True -Condition $sendLimitRejected -Message "MaxSendItems did not block an oversized delta."
+$guardRun = Get-NewestRunDirectory -Root $runOutput
+$guardSummary = Get-Content -Raw -LiteralPath (Join-Path $guardRun "sync-summary.json") -Encoding UTF8 | ConvertFrom-Json
+$guardState = Get-Content -Raw -LiteralPath (Join-Path $runOutput "state/fingerprints.json") -Encoding UTF8 | ConvertFrom-Json
+Assert-True -Condition ($guardSummary.status -eq "failed" -and $guardSummary.sendAttempted -eq $false) -Message "MaxSendItems guard did not abort before send."
+Assert-True -Condition (@($guardState.sentCatalog.PSObject.Properties).Count -eq 0 -and @($guardState.sentLive.PSObject.Properties).Count -eq 0) -Message "Blocked send modified confirmed fingerprints."
+
 $sendArguments = $commonArguments.Clone()
 [void]$sendArguments.Remove("DryRun")
 $sendArguments["Send"] = $true
@@ -563,4 +583,5 @@ Write-Host "No loose root artifacts: OK"
 Write-Host "Payload safety: OK"
 Write-Host "Dry-run network isolation: OK"
 Write-Host "Send credential guards: OK"
+Write-Host "MaxSendItems pre-POST guard: OK"
 Write-Host "Smoke evidence root: $runOutput"

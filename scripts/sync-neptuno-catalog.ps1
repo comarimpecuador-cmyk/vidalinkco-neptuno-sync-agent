@@ -72,6 +72,10 @@ param(
     [switch]$Send,
 
     [Parameter()]
+    [ValidateRange(1, 1000000)]
+    [int]$MaxSendItems = 1000,
+
+    [Parameter()]
     [switch]$DryRun,
 
     [Parameter()]
@@ -1535,7 +1539,12 @@ $sendAttempted = $false
 $stateUpdated = $false
 $cursorsUpdated = $false
 try {
-    if ($Send -and ($catalogChangedSeen + $liveChangedSeen) -gt 0) {
+    $changedSendItems = [long]$catalogChangedSeen + [long]$liveChangedSeen
+    if ($Send -and $changedSendItems -gt $MaxSendItems) {
+        throw "Send guardrail blocked POST: changedCatalogItems + changedLiveItems is $changedSendItems, above MaxSendItems=$MaxSendItems."
+    }
+
+    if ($Send -and $changedSendItems -gt 0) {
         $sendAttempted = $true
         if (-not $MockSendSuccess) {
             $deltaPayload = Get-Content -Raw -LiteralPath (Join-Path $runDirectory "changed-products.json") -Encoding UTF8 | ConvertFrom-Json
