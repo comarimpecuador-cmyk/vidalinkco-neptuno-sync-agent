@@ -12,6 +12,8 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $repoRoot "exports/neptuno-sync-smoke"
 }
 $mainScript = Join-Path $PSScriptRoot "sync-neptuno-catalog.ps1"
+$retentionScript = Join-Path $PSScriptRoot "NeptunoSyncRetention.ps1"
+$cleanupScript = Join-Path $PSScriptRoot "cleanup-neptuno-sync-exports.ps1"
 $catalogSqlPath = Join-Path $repoRoot "docs/sql/neptuno-sync-catalog-query.sql"
 $liveSqlPath = Join-Path $repoRoot "docs/sql/neptuno-sync-live-query.sql"
 $resolvedOutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
@@ -182,6 +184,8 @@ function Get-NewestRunDirectory {
 }
 
 Assert-PowerShellParser -Path $mainScript
+Assert-PowerShellParser -Path $retentionScript
+Assert-PowerShellParser -Path $cleanupScript
 Assert-PowerShellParser -Path $PSCommandPath
 Assert-SelectOnlySqlFile -Path $catalogSqlPath
 Assert-SelectOnlySqlFile -Path $liveSqlPath
@@ -247,6 +251,7 @@ $commonArguments = @{
     DryRun = $true
     ApiUrl = "https://127.0.0.1:1/must-not-connect"
     ApiToken = "smoke-value-never-sent"
+    PreserveFullPayloads = $true
 }
 
 & $mainScript @commonArguments -RunType "Bootstrap" -RebuildState
@@ -342,6 +347,18 @@ Assert-True -Condition (@($incrementalCatalog.items).Count -eq 0 -and @($increme
 Assert-True -Condition ($state1.catalog."9102" -eq $state2.catalog."9102") -Message "Catalog fingerprint is not deterministic."
 Assert-True -Condition ($state1.live."9102|1" -eq $state2.live."9102|1") -Message "Live fingerprint is not deterministic."
 Assert-True -Condition (@($state2.sentCatalog.PSObject.Properties).Count -eq 0 -and @($state2.sentLive.PSObject.Properties).Count -eq 0) -Message "Incremental dry-run consumed pending send fingerprints."
+
+$defaultRetentionOutput = Join-Path $resolvedOutputDirectory "default-retention"
+$defaultRetentionArguments = $commonArguments.Clone()
+$defaultRetentionArguments["OutputDirectory"] = $defaultRetentionOutput
+[void]$defaultRetentionArguments.Remove("PreserveFullPayloads")
+& $mainScript @defaultRetentionArguments -RunType "Bootstrap" -RebuildState
+& $mainScript @defaultRetentionArguments -RunType "Incremental"
+$defaultRetentionRun = Get-LatestRunDirectory -Root $defaultRetentionOutput
+foreach ($payloadName in @("catalog-payload.json", "live-payload.json", "changed-products.json", "quarantine-items.json")) {
+    Assert-True -Condition (-not [System.IO.File]::Exists((Join-Path $defaultRetentionRun $payloadName))) -Message "Default retention kept full payload '$payloadName' for an unchanged successful run."
+}
+Assert-True -Condition ([System.IO.File]::Exists((Join-Path $defaultRetentionRun "artifact-manifest.json"))) -Message "Payload pruning did not leave an artifact manifest."
 
 $guardArguments = $commonArguments.Clone()
 [void]$guardArguments.Remove("DryRun")
@@ -508,7 +525,7 @@ $retentionInterruptedArguments["MaxBatches"] = 1
 & $mainScript @retentionInterruptedArguments
 $retainedRuns = @(Get-ChildItem -LiteralPath (Join-Path $retentionOutput "runs") -Directory)
 $retainedStatuses = @($retainedRuns | ForEach-Object { (Get-Content -Raw -LiteralPath (Join-Path $_.FullName "checkpoint.json") -Encoding UTF8 | ConvertFrom-Json).status })
-Assert-True -Condition ($retainedRuns.Count -eq 3 -and @($retainedStatuses | Where-Object { $_ -eq "interrupted" }).Count -eq 1) -Message "RetentionRuns did not retain two terminal runs plus the interrupted run."
+Assert-True -Condition ($retainedRuns.Count -eq 4 -and @($retainedStatuses | Where-Object { $_ -eq "interrupted" }).Count -eq 1) -Message "Retention policy did not preserve recent terminal runs plus the interrupted run."
 Assert-True -Condition ([System.IO.File]::Exists((Join-Path $retentionOutput "state/fingerprints.json"))) -Message "Retention removed permanent fingerprint state."
 Assert-True -Condition ([System.IO.File]::Exists((Join-Path $retentionOutput "state/cursors.json"))) -Message "Retention removed permanent cursors."
 

@@ -51,7 +51,15 @@ una auditoría de esquema en la PC farmacia; no se debe adivinar el join.
 -Eligibility       AllForAudit, ActiveSellable o ActiveSellableWithStock
 -OnInvalidLive     Quarantine (default) o FailFast
 -RunType           Bootstrap, Incremental (default) o Audit
--RetentionRuns     runs conservados; default 20
+-RetentionRuns     alias legado para minimo de exitosos; default 10
+-RetentionEnabled  true por defecto; desactiva cleanup automatico si es false
+-SuccessfulRunRetentionDays  default 7
+-FailedRunRetentionDays      default 30
+-MinimumSuccessfulRunsToKeep default 10
+-MinimumFailedRunsToKeep     default 20
+-PreserveFullPayloads        conserva payloads completos de runs completados
+-PreserveFailedPayloads      default true
+-CleanupDryRun               calcula cleanup al final sin borrar
 -Send              habilita explícitamente el POST
 -MaxSendItems      máximo para POST normal; default y máximo 1000
 -InitialBaseline   habilita explícitamente el baseline enviado por chunks
@@ -163,7 +171,10 @@ autoritativos del checkpoint.
 Al completar cada lote, la consola muestra `syncRunId`, tipo, último ID,
 filas vistas, cambios, quarantine y tiempo transcurrido. El script escribe de
 forma atómica `runs/<syncRunId>/checkpoint.json` y conserva trabajo interno
-acotado bajo `work/`. Al completar, compone los artefactos finales y elimina
+acotado bajo `work/`. El estado reanudable acumulativo vive en un unico
+`work/progress-state.json` reemplazable; no se crean snapshots acumulativos por
+lote. Los NDJSON bajo `work/batches/` contienen solamente el lote
+correspondiente. Al completar, compone los artefactos finales y elimina
 `work/`.
 
 Para una prueba controlada que se detenga luego de dos lotes:
@@ -233,18 +244,58 @@ exports/neptuno-sync/
     live-payload.json
     changed-products.json
     quarantine-items.json
+    artifact-manifest.json
     sync-summary.json
     sync-events.ndjson
     sync-warnings.ndjson
     work/                 # solo mientras running/interrupted/failed
+      batches/*.ndjson
+      progress-state.json
   latest/
     sync-summary.json
 ```
 
-`RetentionRuns` conserva los runs terminales más recientes y borra solamente
-runs viejos con estado `completed` o `failed`. Nunca borra `running`,
-`interrupted` ni `state/`. Quarantine es evidencia de calidad, no basura; queda
-sujeto a la misma retención auditable del run.
+La retencion usa el criterio mas protector: un run se conserva si cumple el
+criterio de edad o el criterio de cantidad minima. Por defecto:
+
+- `completed`: conservar ultimos 7 dias o los 10 completados mas recientes.
+- `failed`: conservar ultimos 30 dias o los 20 fallidos mas recientes.
+- `running` e `interrupted`: nunca se eliminan automaticamente.
+- `state/`, `latest/`, fingerprints y cursors nunca se eliminan.
+
+Al terminar un run `completed`, los payloads completos se consideran diagnostico
+temporal y se podan salvo que se use `-PreserveFullPayloads`. Permanecen
+`sync-summary.json`, `checkpoint.json`, eventos, warnings y
+`artifact-manifest.json`. Los payloads de runs `failed` se conservan por defecto
+para diagnostico (`-PreserveFailedPayloads $false` permite podarlos
+explicitamente).
+
+La limpieza automatica al final de un run es idempotente y tolerante a errores:
+si un archivo esta bloqueado o una carpeta incompleta no puede borrarse, se
+emite warning pero una sincronizacion exitosa no se convierte en fallida.
+
+Preview operativo sin borrar nada:
+
+```powershell
+.\scripts\cleanup-neptuno-sync-exports.ps1
+```
+
+Aplicacion destructiva solo tras revisar el preview:
+
+```powershell
+.\scripts\cleanup-neptuno-sync-exports.ps1 -Apply
+```
+
+Carpetas historicas de smoke/test conocidas solo se incluyen si se pide
+explicitamente:
+
+```powershell
+.\scripts\cleanup-neptuno-sync-exports.ps1 -IncludeHistoricalTestDirectories
+```
+
+`exports/local-audit` se reporta por separado y no se elimina automaticamente.
+Con `-Apply`, el script aborta si la tarea programada
+`Vidalinkco NEPTUNO Sync` esta `Running`.
 
 Los fingerprints excluyen timestamps volátiles, normalizan strings con `Trim`,
 mantienen `null` estable y ordenan propiedades antes de SHA-256. Con
@@ -515,6 +566,7 @@ contrato documentado por el proveedor, seguido de revisión humana.
 
 ```powershell
 .\scripts\smoke-neptuno-sync-payload.ps1
+.\scripts\smoke-neptuno-sync-retention.ps1
 .\scripts\smoke-run-neptuno-sync-production.ps1
 .\scripts\smoke-neptuno-initial-baseline.ps1
 ```
@@ -524,11 +576,14 @@ el timeout se simulan con switches internos no operativos. Valida Bootstrap,
 Incremental, Audit, keyset por lotes, checkpoint, interrupción/reanudación,
 aislamiento de fallos, `StartAfterExternalId`, confirmación de state, separación
 catálogo/live, negativos, ExternalIds, retención y seguridad de payload.
-El segundo smoke prueba el wrapper con configuración temporal: configuración
+El segundo smoke prueba la retencion: state/latest protegidos, run activo
+preservado, edad/cantidad minima, dry-run/apply, archivo bloqueado, rechazo de
+rutas externas e idempotencia.
+El tercer smoke prueba el wrapper con configuración temporal: configuración
 válida, rechazo del dominio example, rechazo del ApiKey placeholder, aislamiento
 del token y `ExternalIds 9102` en dry-run. No lee ni modifica la configuración
 local real.
-El tercer smoke genera 1200 elementos sintéticos y valida tres chunks
+El cuarto smoke genera 1200 elementos sintéticos y valida tres chunks
 `500/500/200`, identidades únicas, máximo de 1000 por request, fallo reanudable,
 no retransmisión de chunks aceptados, transición a incremental y permanencia
 del guardrail no chunked. También simula HTTP 429 en chunk 2 con `Retry-After`,

@@ -75,6 +75,23 @@ completado. La retención nunca elimina runs `running` o `interrupted`.
 El SQL operativo compara el ID numérico nativo y no depende de `TRY_CONVERT` ni
 `TRY_CAST`, para mantener compatibilidad con el SQL Server de farmacia.
 
+Retencion productiva de `exports/neptuno-sync`:
+
+- Nunca borrar automaticamente `state/`, `latest/`, fingerprints, cursors,
+  configuracion local ni evidencia de un run no terminal.
+- Runs `completed`: conservar si estan dentro de los ultimos 7 dias o dentro
+  de los 10 completados mas recientes.
+- Runs `failed`: conservar si estan dentro de los ultimos 30 dias o dentro de
+  los 20 fallidos mas recientes.
+- Payloads completos de runs `completed` son diagnostico temporal; por defecto
+  se podan despues de conservar `sync-summary.json`, `checkpoint.json`,
+  `sync-events.ndjson`, `sync-warnings.ndjson` y `artifact-manifest.json`.
+- Payloads de runs `failed` se conservan por defecto para diagnostico.
+- `work/batches/*.ndjson` guarda solo cada lote; el progreso acumulativo de
+  resume vive en un unico `work/progress-state.json` reemplazable.
+- La limpieza es idempotente y tolerante a archivos bloqueados; un warning de
+  limpieza no cambia un resultado de sincronizacion exitoso a fallido.
+
 El endpoint delta debe usar HTTPS y responder con el envelope estándar. El
 wrapper de producción lo construye desde `VidalinkcoBaseUrl` y lee la ApiKey
 local sin imprimirla. Detalle operativo: `docs/NEPTUNO_SYNC_AGENT_RUNBOOK.md`.

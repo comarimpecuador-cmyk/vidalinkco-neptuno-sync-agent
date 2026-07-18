@@ -174,6 +174,38 @@ dotnet run --project .\Vidalinkco.NeptunoSyncAgent -- --catalog-csv-once
 
 El agente envia por lotes de `CatalogSendBatchSize`. No pegues la API key ni CSV reales en commits, issues o logs compartidos.
 
+## Limpieza segura de exports NEPTUNO
+
+La sincronizacion SQL por PowerShell escribe estado operativo en `exports/neptuno-sync`. La limpieza nunca debe borrar `state/`, `latest/`, cursores, fingerprints, configuracion local ni runs `running`/`interrupted`.
+
+Preview sin borrar nada:
+
+```powershell
+.\scripts\cleanup-neptuno-sync-exports.ps1
+```
+
+Aplicar limpieza, solo despues de revisar el preview:
+
+```powershell
+.\scripts\cleanup-neptuno-sync-exports.ps1 -Apply
+```
+
+Para incluir carpetas historicas de smoke/test conocidas en el preview:
+
+```powershell
+.\scripts\cleanup-neptuno-sync-exports.ps1 -IncludeHistoricalTestDirectories
+```
+
+Politica default:
+
+- Runs exitosos: conservar si son de los ultimos 7 dias o estan dentro de los 10 exitosos mas recientes.
+- Runs fallidos: conservar si son de los ultimos 30 dias o estan dentro de los 20 fallidos mas recientes.
+- Payloads completos de runs exitosos (`catalog-payload.json`, `live-payload.json`, `changed-products.json`, `quarantine-items.json`) se podan por defecto despues de dejar `sync-summary.json`, `checkpoint.json`, eventos y `artifact-manifest.json`.
+- Payloads de runs fallidos se conservan por defecto para diagnostico.
+- `exports/local-audit` se reporta, pero no se elimina automaticamente.
+
+Si la tarea programada `Vidalinkco NEPTUNO Sync` esta `Running`, el script aborta cualquier ejecucion con `-Apply`.
+
 ## Publicar EXE self-contained para Windows
 
 ```powershell

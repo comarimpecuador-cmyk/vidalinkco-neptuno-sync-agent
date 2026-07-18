@@ -65,7 +65,35 @@ param(
 
     [Parameter()]
     [ValidateRange(1, 1000)]
-    [int]$RetentionRuns = 20,
+    [int]$RetentionRuns = 10,
+
+    [Parameter()]
+    [bool]$RetentionEnabled = $true,
+
+    [Parameter()]
+    [ValidateRange(1, 3650)]
+    [int]$SuccessfulRunRetentionDays = 7,
+
+    [Parameter()]
+    [ValidateRange(1, 3650)]
+    [int]$FailedRunRetentionDays = 30,
+
+    [Parameter()]
+    [ValidateRange(0, 100000)]
+    [int]$MinimumSuccessfulRunsToKeep = 10,
+
+    [Parameter()]
+    [ValidateRange(0, 100000)]
+    [int]$MinimumFailedRunsToKeep = 20,
+
+    [Parameter()]
+    [switch]$PreserveFullPayloads,
+
+    [Parameter()]
+    [bool]$PreserveFailedPayloads = $true,
+
+    [Parameter()]
+    [switch]$CleanupDryRun,
 
     [Parameter()]
     [switch]$Send,
@@ -132,6 +160,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $repoRoot "exports/neptuno-sync"
 }
 . (Join-Path $PSScriptRoot "NeptunoAudit.Common.ps1")
+. (Join-Path $PSScriptRoot "NeptunoSyncRetention.ps1")
 
 function Get-RowValue {
     param(
@@ -1291,6 +1320,9 @@ if ($null -ne $MockChunkRateLimitAt -and (-not $InitialBaseline -or -not $MockSe
 if ($null -ne $MockRetryAfterSeconds -and $null -eq $MockChunkRateLimitAt) {
     throw "MockRetryAfterSeconds requires MockChunkRateLimitAt."
 }
+if ($PSBoundParameters.ContainsKey("RetentionRuns") -and -not $PSBoundParameters.ContainsKey("MinimumSuccessfulRunsToKeep")) {
+    $MinimumSuccessfulRunsToKeep = $RetentionRuns
+}
 $effectiveDryRun = -not $Send
 $effectiveApiUrl = if ([string]::IsNullOrWhiteSpace($ApiUrl)) { $env:VIDALINKCO_NEPTUNO_SYNC_URL } else { $ApiUrl }
 $effectiveApiToken = if ([string]::IsNullOrWhiteSpace($ApiToken)) { $env:VIDALINKCO_NEPTUNO_SYNC_TOKEN } else { $ApiToken }
@@ -1332,6 +1364,37 @@ $externalIdsKey = if ($externalIdsFilterApplied) { @($normalizedExternalIds) -jo
 [System.IO.Directory]::CreateDirectory($stateDirectory) | Out-Null
 [System.IO.Directory]::CreateDirectory($runsDirectory) | Out-Null
 [System.IO.Directory]::CreateDirectory($latestDirectory) | Out-Null
+
+function Invoke-NeptunoSyncRetentionSafely {
+    if (-not $RetentionEnabled) {
+        return
+    }
+
+    try {
+        $plan = New-NeptunoSyncCleanupPlan `
+            -OutputDirectory $resolvedOutputDirectory `
+            -SuccessfulRunRetentionDays $SuccessfulRunRetentionDays `
+            -FailedRunRetentionDays $FailedRunRetentionDays `
+            -MinimumSuccessfulRunsToKeep $MinimumSuccessfulRunsToKeep `
+            -MinimumFailedRunsToKeep $MinimumFailedRunsToKeep `
+            -PreserveFullPayloads ([bool]$PreserveFullPayloads) `
+            -PreserveFailedPayloads $PreserveFailedPayloads `
+            -IncludeHistoricalTestDirectories $false
+        $result = Invoke-NeptunoSyncCleanupPlan -Plan $plan -Apply:(!$CleanupDryRun)
+        if (@($result.errors).Count -gt 0) {
+            Write-Warning "Retention cleanup completed with errors: $($result.errors -join '; ')"
+        }
+        elseif ($CleanupDryRun) {
+            Write-Host "Retention cleanup preview: $($plan.totals.candidateFiles) file(s), $($plan.totals.candidateBytes) byte(s) eligible."
+        }
+        else {
+            Write-Host "Retention cleanup applied: $($result.deletedFiles) file(s), $($result.deletedBytes) byte(s) freed."
+        }
+    }
+    catch {
+        Write-Warning "Retention cleanup failed but sync result is preserved: $($_.Exception.Message)"
+    }
+}
 
 $resumeRun = $null
 if ($InitialBaseline -and -not $Resume) {
@@ -1470,10 +1533,10 @@ $emitFullPayloads = $RunType -in @("Bootstrap", "Audit")
 $workDirectory = Join-Path $runDirectory "work"
 $batchWorkDirectory = Join-Path $workDirectory "batches"
 $progressWorkDirectory = Join-Path $workDirectory "progress"
+$progressStatePath = Join-Path $workDirectory "progress-state.json"
 $checkpointPath = Join-Path $runDirectory "checkpoint.json"
 [System.IO.Directory]::CreateDirectory($runDirectory) | Out-Null
 [System.IO.Directory]::CreateDirectory($batchWorkDirectory) | Out-Null
-[System.IO.Directory]::CreateDirectory($progressWorkDirectory) | Out-Null
 
 $initialStartAfter = if ($null -eq $StartAfterExternalId) { 0L } else { [long]$StartAfterExternalId }
 $catalogLastExternalId = $initialStartAfter
@@ -1510,7 +1573,10 @@ if ($Resume) {
     $negativeStockSeen = [int]$checkpoint.negativeStockSeen
     $runStartedAt = [string]$checkpoint.startedAt
     if ($batchesCompleted -gt 0) {
-        $progressPath = Join-Path $progressWorkDirectory ("{0:D8}.json" -f $batchesCompleted)
+        $progressPath = $progressStatePath
+        if (-not [System.IO.File]::Exists($progressPath)) {
+            $progressPath = Join-Path $progressWorkDirectory ("{0:D8}.json" -f $batchesCompleted)
+        }
         if (-not [System.IO.File]::Exists($progressPath)) {
             throw "Resume checkpoint has no matching progress state."
         }
@@ -1757,7 +1823,7 @@ try {
             sentCatalog = ConvertTo-OrderedMap -Map $nextSentCatalog
             sentLive = ConvertTo-OrderedMap -Map $nextSentLive
         }
-        Write-JsonFileAtomic -Path (Join-Path $progressWorkDirectory "$batchPrefix.json") -Value $progressState
+        Write-JsonFileAtomic -Path $progressStatePath -Value $progressState
 
         $checkpoint.catalogLastExternalId = $catalogLastExternalId
         $checkpoint.liveLastExternalId = $liveLastExternalId
@@ -1893,7 +1959,7 @@ if ($null -ne $runFailure) {
         failureType = $runFailure.Exception.GetType().Name
     }
     Write-JsonFileAtomic -Path (Join-Path $runDirectory "sync-summary.json") -Value $failedSummary
-    Invoke-RunRetention -RunsDirectory $runsDirectory -Keep $RetentionRuns
+    Invoke-NeptunoSyncRetentionSafely
     throw "Batch execution failed. checkpoint=$checkpointPath reason=$($runFailure.Exception.Message)"
 }
 
@@ -2090,7 +2156,7 @@ catch {
         failureType = $finalizationFailure.Exception.GetType().Name
     }
     Write-JsonFileAtomic -Path (Join-Path $runDirectory "sync-summary.json") -Value $failedSummary
-    Invoke-RunRetention -RunsDirectory $runsDirectory -Keep $RetentionRuns
+    Invoke-NeptunoSyncRetentionSafely
     throw "Run finalization failed. checkpoint=$checkpointPath reason=$($finalizationFailure.Exception.Message)"
 }
 
@@ -2163,7 +2229,7 @@ if ($resolvedWorkDirectory.StartsWith($runPrefix, [System.StringComparison]::Ord
     -not ((Get-Item -LiteralPath $resolvedWorkDirectory -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
     Remove-Item -LiteralPath $resolvedWorkDirectory -Recurse -Force
 }
-Invoke-RunRetention -RunsDirectory $runsDirectory -Keep $RetentionRuns
+Invoke-NeptunoSyncRetentionSafely
 
 Write-Host "NEPTUNO sync completed."
 Write-Host "Run type: $RunType; mode: $Mode; batches: $batchesCompleted; dry-run: $effectiveDryRun"
