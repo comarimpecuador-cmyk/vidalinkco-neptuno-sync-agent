@@ -26,6 +26,10 @@ param(
     [bool]$PreserveFailedPayloads = $true,
 
     [Parameter()]
+    [ValidateRange(1, 87600)]
+    [int]$StaleRunningAfterHours = 24,
+
+    [Parameter()]
     [switch]$IncludeHistoricalTestDirectories,
 
     [Parameter()]
@@ -70,6 +74,8 @@ function Test-NeptunoSyncScheduledTaskRunning {
     }
 }
 
+$syncTaskRunning = Test-NeptunoSyncScheduledTaskRunning
+
 $plan = New-NeptunoSyncCleanupPlan `
     -OutputDirectory $OutputDirectory `
     -SuccessfulRunRetentionDays $SuccessfulRunRetentionDays `
@@ -78,6 +84,9 @@ $plan = New-NeptunoSyncCleanupPlan `
     -MinimumFailedRunsToKeep $MinimumFailedRunsToKeep `
     -PreserveFullPayloads ([bool]$PreserveFullPayloads) `
     -PreserveFailedPayloads $PreserveFailedPayloads `
+    -EnableStaleRunningCleanup $true `
+    -StaleRunningAfterHours $StaleRunningAfterHours `
+    -SyncTaskRunning $syncTaskRunning `
     -IncludeHistoricalTestDirectories ([bool]$IncludeHistoricalTestDirectories)
 
 Write-Host "NEPTUNO export cleanup mode: $(if ($Apply) { 'APPLY' } else { 'PREVIEW' })"
@@ -85,6 +94,8 @@ Write-Host "Output directory: $($plan.outputDirectory)"
 Write-Host "Policy: successful $SuccessfulRunRetentionDays day(s) or newest $MinimumSuccessfulRunsToKeep; failed $FailedRunRetentionDays day(s) or newest $MinimumFailedRunsToKeep."
 Write-Host "Full payload preservation for completed runs: $([bool]$PreserveFullPayloads)"
 Write-Host "Failed payload preservation: $PreserveFailedPayloads"
+Write-Host "Stale running threshold: $StaleRunningAfterHours hour(s)"
+Write-Host "Scheduled task 'Vidalinkco NEPTUNO Sync' running: $syncTaskRunning"
 Write-Host ""
 
 if (@($plan.candidates).Count -eq 0) {
@@ -93,7 +104,7 @@ if (@($plan.candidates).Count -eq 0) {
 else {
     Write-Host "Cleanup candidates:"
     $plan.candidates |
-        Select-Object action, category, relativePath, status, ageDays, fileCount, @{Name = "size"; Expression = { Format-Bytes -Bytes $_.bytes } }, reason |
+        Select-Object action, effect, category, relativePath, status, ageDays, fileCount, @{Name = "size"; Expression = { Format-Bytes -Bytes $_.bytes } }, reason |
         Format-Table -AutoSize | Out-String -Width 240 | Write-Host
 }
 
@@ -112,7 +123,7 @@ if (@($plan.errors).Count -gt 0) {
 Write-Host "Candidate files: $($plan.totals.candidateFiles)"
 Write-Host "Candidate size: $(Format-Bytes -Bytes ([long]$plan.totals.candidateBytes))"
 
-if ($Apply -and (Test-NeptunoSyncScheduledTaskRunning)) {
+if ($Apply -and $syncTaskRunning) {
     throw "Refusing destructive cleanup because scheduled task 'Vidalinkco NEPTUNO Sync' is Running."
 }
 

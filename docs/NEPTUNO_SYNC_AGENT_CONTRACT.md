@@ -83,12 +83,20 @@ Retencion productiva de `exports/neptuno-sync`:
   de los 10 completados mas recientes.
 - Runs `failed`: conservar si estan dentro de los ultimos 30 dias o dentro de
   los 20 fallidos mas recientes.
+- `running` no equivale automaticamente a activo. El cleanup manual puede
+  clasificar `StaleRunning` solo si el run supera `StaleRunningAfterHours`, la
+  tarea programada `Vidalinkco NEPTUNO Sync` no esta `Running` y no hay
+  `processId` activo declarado en el checkpoint.
 - Payloads completos de runs `completed` son diagnostico temporal; por defecto
   se podan despues de conservar `sync-summary.json`, `checkpoint.json`,
   `sync-events.ndjson`, `sync-warnings.ndjson` y `artifact-manifest.json`.
 - Payloads de runs `failed` se conservan por defecto para diagnostico.
+- Legacy bootstrap: si `sync-summary.json` contiene `completedAt`, el run se
+  trata como `completed` aunque falte metadata moderna de status.
 - `work/batches/*.ndjson` guarda solo cada lote; el progreso acumulativo de
   resume vive en un unico `work/progress-state.json` reemplazable.
+- Legacy progress: en runs `StaleRunning` o `interrupted`, `work/progress/*.json`
+  se compacta conservando solo el snapshot mas reciente.
 - La limpieza es idempotente y tolerante a archivos bloqueados; un warning de
   limpieza no cambia un resultado de sincronizacion exitoso a fallido.
 

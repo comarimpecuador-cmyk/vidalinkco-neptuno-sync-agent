@@ -206,6 +206,24 @@ Politica default:
 
 Si la tarea programada `Vidalinkco NEPTUNO Sync` esta `Running`, el script aborta cualquier ejecucion con `-Apply`.
 
+Fase 2 tambien reconoce deuda historica:
+
+- `sync-summary.json` con `completedAt` se trata como `completed` aunque falte metadata moderna.
+- Runs `running` antiguos solo se reclasifican como `StaleRunning` si superan `-StaleRunningAfterHours`, la tarea `Vidalinkco NEPTUNO Sync` no esta corriendo y no existe `processId` activo en el checkpoint.
+- Runs `StaleRunning` o `interrupted` con `work/progress/*.json` legacy se compactan conservando solo el snapshot mas reciente.
+- El preview muestra acciones como `ClassifyStaleRun`, `DeleteLegacyPayload`, `CompactLegacyProgress` y `PreserveNewestProgressSnapshot`.
+
+Las tareas programadas de produccion deben invocar launchers VBS para evitar parpadeo de PowerShell:
+
+- `scripts/run-neptuno-sync-production.vbs`
+- `scripts/run-neptuno-heartbeat-production.vbs`
+
+Instalacion/actualizacion opcional de tareas:
+
+```powershell
+.\scripts\install-neptuno-scheduled-tasks.ps1 -WhatIf
+```
+
 ## Publicar EXE self-contained para Windows
 
 ```powershell

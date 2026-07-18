@@ -17,6 +17,7 @@ $sandboxProject = Join-Path $sandboxRoot "Vidalinkco.NeptunoSyncAgent"
 $sandboxLatest = Join-Path $sandboxRoot "exports/neptuno-sync/latest"
 $capturePath = Join-Path $sandboxRoot "capture.json"
 $wrapperPath = Join-Path $sandboxScripts "run-neptuno-heartbeat-production.ps1"
+$launcherSourcePath = Join-Path $PSScriptRoot "run-neptuno-heartbeat-production.vbs"
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
 function Assert-True {
@@ -32,6 +33,10 @@ if ([System.IO.Directory]::Exists($sandboxRoot)) {
 [System.IO.Directory]::CreateDirectory($sandboxLatest) | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "run-neptuno-heartbeat-production.ps1") -Destination $wrapperPath
 [System.IO.File]::WriteAllText((Join-Path $sandboxProject "Vidalinkco.NeptunoSyncAgent.csproj"), "<Project />`n", $utf8NoBom)
+
+Assert-True ([System.IO.File]::Exists($launcherSourcePath)) "Heartbeat VBS launcher source is missing."
+$launcherSource = Get-Content -Raw -LiteralPath $launcherSourcePath
+Assert-True ($launcherSource -match "run-neptuno-heartbeat-production\.ps1" -and $launcherSource -match "-WindowStyle Hidden" -and $launcherSource -match "WScript\.Quit exitCode") "Heartbeat VBS launcher does not hide PowerShell and return exit code."
 
 $configuration = [ordered]@{
     NeptunoSyncAgent = [ordered]@{
@@ -85,4 +90,5 @@ Assert-True ($output -notmatch "smoke-heartbeat-secret-not-production") "Wrapper
 Write-Host "NEPTUNO heartbeat production wrapper smoke passed."
 Write-Host "Latest summary forwarding: OK"
 Write-Host "No SQL/full sync invocation: OK"
+Write-Host "Hidden VBS launcher contract: OK"
 Write-Host "Token output isolation: OK"

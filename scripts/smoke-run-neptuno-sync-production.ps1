@@ -12,6 +12,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $repoRoot "exports/neptuno-production-wrapper-smoke"
 }
 $wrapperSourcePath = Join-Path $PSScriptRoot "run-neptuno-sync-production.ps1"
+$launcherSourcePath = Join-Path $PSScriptRoot "run-neptuno-sync-production.vbs"
 $resolvedOutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 $sandboxRoot = Join-Path $resolvedOutputDirectory "sandbox"
 $sandboxScripts = Join-Path $sandboxRoot "scripts"
@@ -54,6 +55,10 @@ if ([System.IO.Directory]::Exists($sandboxRoot)) {
 [System.IO.Directory]::CreateDirectory($sandboxScripts) | Out-Null
 [System.IO.Directory]::CreateDirectory($sandboxConfigDirectory) | Out-Null
 Copy-Item -LiteralPath $wrapperSourcePath -Destination $wrapperPath
+
+Assert-True -Condition ([System.IO.File]::Exists($launcherSourcePath)) -Message "Production VBS launcher source is missing."
+$launcherSource = Get-Content -Raw -LiteralPath $launcherSourcePath
+Assert-True -Condition ($launcherSource -match "run-neptuno-sync-production\.ps1" -and $launcherSource -match "-WindowStyle Hidden" -and $launcherSource -match "WScript\.Quit exitCode") -Message "Sync VBS launcher does not hide PowerShell and return exit code."
 
 $stubScript = @'
 [CmdletBinding()]
@@ -161,5 +166,6 @@ Write-Host "Example domain rejection: OK"
 Write-Host "ApiKey placeholder rejection: OK"
 Write-Host "ExternalIds 9102 dry-run: OK"
 Write-Host "InitialBaseline and resume forwarding: OK"
+Write-Host "Hidden VBS launcher contract: OK"
 Write-Host "Token output isolation: OK"
 Write-Host "Smoke evidence root: $resolvedOutputDirectory"

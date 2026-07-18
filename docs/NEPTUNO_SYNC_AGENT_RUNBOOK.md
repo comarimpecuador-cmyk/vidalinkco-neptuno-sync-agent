@@ -60,6 +60,7 @@ una auditoría de esquema en la PC farmacia; no se debe adivinar el join.
 -PreserveFullPayloads        conserva payloads completos de runs completados
 -PreserveFailedPayloads      default true
 -CleanupDryRun               calcula cleanup al final sin borrar
+-StaleRunningAfterHours      cleanup manual; default 24
 -Send              habilita explícitamente el POST
 -MaxSendItems      máximo para POST normal; default y máximo 1000
 -InitialBaseline   habilita explícitamente el baseline enviado por chunks
@@ -260,8 +261,20 @@ criterio de edad o el criterio de cantidad minima. Por defecto:
 
 - `completed`: conservar ultimos 7 dias o los 10 completados mas recientes.
 - `failed`: conservar ultimos 30 dias o los 20 fallidos mas recientes.
-- `running` e `interrupted`: nunca se eliminan automaticamente.
+- `running` activo e `interrupted`: no se eliminan automaticamente.
 - `state/`, `latest/`, fingerprints y cursors nunca se eliminan.
+
+Fase 2 agrega limpieza de deuda historica sin cambiar el runtime del sync:
+
+- Un run con `sync-summary.json.completedAt` se considera `completed` aunque
+  venga de un bootstrap legacy sin metadata moderna.
+- `running` solo puede reclasificarse como `StaleRunning` en el cleanup manual
+  si supera `-StaleRunningAfterHours`, la tarea `Vidalinkco NEPTUNO Sync` no
+  esta `Running` y no hay `processId` activo en el checkpoint.
+- `StaleRunning` e `interrupted` pueden compactar `work/progress/*.json`
+  legacy conservando solo el snapshot mas reciente.
+- El preview muestra `ClassifyStaleRun`, `DeleteLegacyPayload`,
+  `CompactLegacyProgress` y `PreserveNewestProgressSnapshot`.
 
 Al terminar un run `completed`, los payloads completos se consideran diagnostico
 temporal y se podan salvo que se use `-PreserveFullPayloads`. Permanecen
@@ -284,6 +297,12 @@ Aplicacion destructiva solo tras revisar el preview:
 
 ```powershell
 .\scripts\cleanup-neptuno-sync-exports.ps1 -Apply
+```
+
+Para ajustar el umbral stale:
+
+```powershell
+.\scripts\cleanup-neptuno-sync-exports.ps1 -StaleRunningAfterHours 48
 ```
 
 Carpetas historicas de smoke/test conocidas solo se incluyen si se pide
@@ -479,16 +498,16 @@ NEPTUNO, el repositorio y `appsettings.local.json`.
 Configure dos tareas separadas. No ejecute el sync completo cada cinco minutos:
 
 1. `Vidalinkco NEPTUNO Sync`: cada 30 minutos, ejecuta
-   `scripts/run-neptuno-sync-production.ps1` y realiza la revisión SQL completa.
+   `scripts/run-neptuno-sync-production.vbs` y realiza la revisión SQL completa.
 2. `Vidalinkco NEPTUNO Heartbeat`: cada 5 minutos, ejecuta
-   `scripts/run-neptuno-heartbeat-production.ps1`, lee solamente
+   `scripts/run-neptuno-heartbeat-production.vbs`, lee solamente
    `exports/neptuno-sync/latest/sync-summary.json` y envía la señal operativa.
 
 Acción del heartbeat oculto:
 
 ```text
-Program/script: powershell.exe
-Add arguments: -WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\ruta\vidalinkco-neptuno-sync-agent\scripts\run-neptuno-heartbeat-production.ps1"
+Program/script: C:\Windows\System32\wscript.exe
+Add arguments: "C:\ruta\vidalinkco-neptuno-sync-agent\scripts\run-neptuno-heartbeat-production.vbs"
 Start in: C:\ruta\vidalinkco-neptuno-sync-agent
 ```
 
@@ -505,8 +524,8 @@ API key en argumentos del programador.
 4. En **Actions**, cree **Start a program** con:
 
    ```text
-   Program/script: powershell.exe
-   Add arguments: -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\ruta\vidalinkco-neptuno-sync-agent\scripts\run-neptuno-sync-production.ps1"
+   Program/script: C:\Windows\System32\wscript.exe
+   Add arguments: "C:\ruta\vidalinkco-neptuno-sync-agent\scripts\run-neptuno-sync-production.vbs"
    Start in: C:\ruta\vidalinkco-neptuno-sync-agent
    ```
 
@@ -515,6 +534,16 @@ API key en argumentos del programador.
    está ejecutándose y habilite reintentos con una pausa prudente.
 7. Guarde, ejecute manualmente una vez y verifique `Last Run Result`, historial
    y `exports/neptuno-sync/latest/sync-summary.json`.
+
+Instalador opcional de tareas con launchers VBS:
+
+```powershell
+.\scripts\install-neptuno-scheduled-tasks.ps1 -WhatIf
+.\scripts\install-neptuno-scheduled-tasks.ps1
+```
+
+Los launchers VBS no cambian la logica del agente: invocan los wrappers
+PowerShell existentes con ventana oculta y devuelven el exit code al Scheduler.
 
 No agregue URL ni ApiKey en los argumentos de la tarea. Para una validación
 programada sin envío, agregue únicamente `-DryRun`; para una prueba dirigida,
@@ -568,6 +597,7 @@ contrato documentado por el proveedor, seguido de revisión humana.
 .\scripts\smoke-neptuno-sync-payload.ps1
 .\scripts\smoke-neptuno-sync-retention.ps1
 .\scripts\smoke-run-neptuno-sync-production.ps1
+.\scripts\smoke-neptuno-heartbeat-production.ps1
 .\scripts\smoke-neptuno-initial-baseline.ps1
 ```
 
@@ -583,7 +613,8 @@ El tercer smoke prueba el wrapper con configuración temporal: configuración
 válida, rechazo del dominio example, rechazo del ApiKey placeholder, aislamiento
 del token y `ExternalIds 9102` en dry-run. No lee ni modifica la configuración
 local real.
-El cuarto smoke genera 1200 elementos sintéticos y valida tres chunks
+El cuarto smoke valida el wrapper de heartbeat sin SQL ni full sync.
+El quinto smoke genera 1200 elementos sintéticos y valida tres chunks
 `500/500/200`, identidades únicas, máximo de 1000 por request, fallo reanudable,
 no retransmisión de chunks aceptados, transición a incremental y permanencia
 del guardrail no chunked. También simula HTTP 429 en chunk 2 con `Retry-After`,
